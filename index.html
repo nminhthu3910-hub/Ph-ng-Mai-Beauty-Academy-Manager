@@ -624,7 +624,14 @@ tr:hover td{background:#fdf6f9}
 
 
 <script>
-// ══ CONFIG ════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════
+//  PHƯƠNG MAI SPA MANAGER — Script v4
+//  Kiến trúc: Sheets là nguồn sự thật
+//             Memory cache = hiển thị nhanh (stale-while-revalidate)
+//             localStorage = backup khi reload, KHÔNG phải nguồn sự thật
+// ════════════════════════════════════════════════════════════
+
+// ══ CONFIG ═══════════════════════════════════════════════════
 const CFG_KEY = 'spa_config';
 let cfg = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
 if (!cfg.scriptUrl) {
@@ -640,66 +647,21 @@ const VAT_RATE = () => (parseFloat(cfg.vat) || 8) / 100;
 const SPA_NAME = () => cfg.spaName  || '🌸 Phương Mai';
 const SPA_ADDR = () => (cfg.address || '') + (cfg.spaPhone ? ' · ☎ ' + cfg.spaPhone : '');
 
-// ══ PERSISTENT STORE ═════════════════════════════════════════
-// Lưu tất cả dữ liệu vào localStorage để không bao giờ mất
-// Key invoices: spa_inv_MM-YYYY  (mảng hoá đơn của tháng đó)
-// Key monthly:  spa_mon_MM-YYYY  (tổng hợp tháng từ getInvoicesByMonth)
-// Key year:     spa_yr_YYYY      (tổng hợp năm từ getInvoicesByYear)
-const CKEY = {
-  services:  'spa_c_services',
-  staff:     'spa_c_staff',
-  customers: 'spa_c_customers',
-  inventory: 'spa_c_inventory',
-};
-const CACHE = {
-  services:  JSON.parse(localStorage.getItem(CKEY.services)  || '[]'),
-  staff:     JSON.parse(localStorage.getItem(CKEY.staff)     || '[]'),
-  customers: JSON.parse(localStorage.getItem(CKEY.customers) || '[]'),
-  inventory: JSON.parse(localStorage.getItem(CKEY.inventory) || '[]'),
-  // invoices hôm nay — nguồn sự thật, CHỈ syncAll() được ghi
-  invoices:  [],
-};
-function cSave(key) { localStorage.setItem(CKEY[key], JSON.stringify(CACHE[key])); }
-
-// --- Lưu/đọc invoices theo tháng (MM-YYYY) ---
-function invMonKey(m, y)   { return `spa_inv_${String(m).padStart(2,'0')}-${y}`; }
-function saveInvMonth(m, y, list) {
-  localStorage.setItem(invMonKey(m, y), JSON.stringify(list));
-}
-function loadInvMonth(m, y) {
-  const raw = localStorage.getItem(invMonKey(m, y));
-  return raw ? JSON.parse(raw) : null;
-}
-
-// --- Lưu/đọc tổng hợp tháng (getInvoicesByMonth result) ---
-function monSumKey(m, y)   { return `spa_mon_${String(m).padStart(2,'0')}-${y}`; }
-function saveMonSum(m, y, list) {
-  localStorage.setItem(monSumKey(m, y), JSON.stringify(list));
-}
-function loadMonSum(m, y) {
-  const raw = localStorage.getItem(monSumKey(m, y));
-  return raw ? JSON.parse(raw) : null;
-}
-
-// --- Lưu/đọc tổng hợp năm ---
-function yrKey(y)      { return `spa_yr_${y}`; }
-function saveYrSum(y, list) { localStorage.setItem(yrKey(y), JSON.stringify(list)); }
-function loadYrSum(y)  { const r = localStorage.getItem(yrKey(y)); return r ? JSON.parse(r) : null; }
-
 // ══ HELPERS ══════════════════════════════════════════════════
 const fmt      = n => (Number(n)||0).toLocaleString('vi-VN') + 'đ';
 const fmtShort = n => {
   n = Number(n)||0;
-  if (n >= 1e9) return (n/1e9).toFixed(1) + 'tỷ';
-  if (n >= 1e6) return (n/1e6).toFixed(1) + 'tr';
-  if (n >= 1e3) return (n/1e3).toFixed(0) + 'k';
+  if (n >= 1e9) return (n/1e9).toFixed(1)+'tỷ';
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'tr';
+  if (n >= 1e3) return (n/1e3).toFixed(0)+'k';
   return n.toString();
 };
+// todayStr dùng local time — KHÔNG dùng toISOString (UTC)
 const todayStr = () => {
   const d = new Date();
   return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
 };
-// isoToday dùng LOCAL time (không dùng UTC) để tránh lệch ngày qua đêm
+// isoToday dùng local time cho input[type=date]
 const isoToday = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -713,50 +675,112 @@ function isoToDmy(iso) {
 function daysInMonth(m, y) { return new Date(y, m, 0).getDate(); }
 function trendHtml(cur, prev) {
   if (!prev) return '<span class="trend-flat">Chưa có dữ liệu kỳ trước</span>';
-  const pct = Math.round((cur - prev) / prev * 100);
+  const pct = Math.round((cur-prev)/prev*100);
   if (pct > 0)  return `<span class="trend-up">▲ ${pct}% so kỳ trước</span>`;
   if (pct < 0)  return `<span class="trend-down">▼ ${Math.abs(pct)}% so kỳ trước</span>`;
   return `<span class="trend-flat">= Không đổi</span>`;
 }
 
+// ══ MEMORY CACHE (stale-while-revalidate) ════════════════════
+// Cấu trúc: MC[key] = { data, ts }  (ts = timestamp ms)
+// TTL: 30 giây — dùng stale data nếu < 30s, fetch mới nếu > 30s
+const MC_TTL = 30_000;
+const MC = {};
+
+function mcSet(key, data) {
+  MC[key] = { data, ts: Date.now() };
+  // Lưu backup vào localStorage
+  try { localStorage.setItem('spa_mc_' + key, JSON.stringify({ data, ts: Date.now() })); } catch(e) {}
+}
+function mcGet(key) {
+  // Ưu tiên memory
+  if (MC[key]) return MC[key].data;
+  // Fallback localStorage (thiết bị mới / reload)
+  try {
+    const raw = localStorage.getItem('spa_mc_' + key);
+    if (!raw) return null;
+    const obj = JSON.parse(raw);
+    // invoices hôm nay: chỉ dùng nếu đúng ngày hôm nay
+    if (key.startsWith('inv_')) {
+      const dateInKey = key.replace('inv_', ''); // "dd-MM-yyyy"
+      const todayKey  = todayStr().replace(/\//g, '-');
+      if (dateInKey !== todayKey) return null;
+    }
+    MC[key] = obj; // cache vào memory
+    return obj.data;
+  } catch(e) { return null; }
+}
+function mcFresh(key) {
+  if (!MC[key]) return false;
+  return (Date.now() - MC[key].ts) < MC_TTL;
+}
+
+// Keys chuẩn
+const K = {
+  services:  'services',
+  staff:     'staff',
+  customers: 'customers',
+  inventory: 'inventory',
+  invToday:  () => 'inv_' + todayStr().replace(/\//g, '-'),
+  invDate:   (dmy) => 'inv_' + dmy.replace(/\//g, '-'),
+  monSum:    (m,y) => `mon_${String(m).padStart(2,'0')}_${y}`,
+  yrSum:     (y)   => `yr_${y}`,
+};
+
+// Shortcut đọc master cache (luôn có sau syncAll)
+const C = {
+  get services()  { return mcGet(K.services)  || []; },
+  get staff()     { return mcGet(K.staff)      || []; },
+  get customers() { return mcGet(K.customers)  || []; },
+  get inventory() { return mcGet(K.inventory)  || []; },
+  get invoices()  { return mcGet(K.invToday()) || []; },
+};
+
+// ══ UI HELPERS ════════════════════════════════════════════════
 function showLoading(msg='Đang xử lý...') {
   document.getElementById('loading').classList.remove('hidden');
   document.getElementById('loading-msg').textContent = msg;
 }
 function hideLoading() { document.getElementById('loading').classList.add('hidden'); }
 function setSyncing(on) { document.getElementById('sync-btn').classList.toggle('spinning', on); }
+
+// Spinner nhỏ trong từng tab (không block UI)
+function setTabLoading(tabId, on) {
+  const el = document.getElementById('tab-loading-' + tabId);
+  if (el) el.style.display = on ? 'inline-block' : 'none';
+}
+
 function toast(msg, type='info') {
   const el = document.createElement('div');
   el.className = `alert alert-${type==='error'?'danger':'info'}`;
-  el.style.cssText = 'position:fixed;bottom:1.2rem;right:1.2rem;z-index:999;min-width:220px;box-shadow:0 4px 16px rgba(0,0,0,.15)';
+  el.style.cssText = 'position:fixed;bottom:1.2rem;right:1.2rem;z-index:999;min-width:220px;box-shadow:0 4px 16px rgba(0,0,0,.15);animation:fadeUp .2s ease';
   el.textContent = msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 3500);
 }
 
-// Banner mất internet
 function showOfflineBanner() {
   let b = document.getElementById('offline-banner');
   if (!b) {
     b = document.createElement('div');
     b.id = 'offline-banner';
     b.className = 'alert alert-danger';
-    b.style.cssText = 'position:fixed;top:56px;left:0;right:0;z-index:300;border-radius:0;text-align:center;margin:0';
-    b.textContent = '📵 Mất kết nối internet — Vui lòng kết nối lại để đồng bộ dữ liệu mới nhất';
+    b.style.cssText = 'position:fixed;top:56px;left:0;right:0;z-index:300;border-radius:0;text-align:center;margin:0;padding:.55rem';
+    b.textContent = '📵 Mất kết nối — Đang hiển thị dữ liệu đã lưu';
     document.body.appendChild(b);
   }
 }
 function hideOfflineBanner() {
-  const b = document.getElementById('offline-banner');
-  if (b) b.remove();
+  const b = document.getElementById('offline-banner'); if (b) b.remove();
 }
 
 // ══ CLOCK ════════════════════════════════════════════════════
 function updateClock() {
   const s = new Date().toLocaleString('vi-VN',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
-  document.getElementById('nav-clock').textContent = s;
-  const posdt = document.getElementById('pos-dt');
-  if (posdt) posdt.textContent = s;
+  const nc = document.getElementById('nav-clock');
+  const pd = document.getElementById('pos-dt');
+  if (nc) nc.textContent = s;
+  if (pd) pd.textContent = s;
 }
 updateClock(); setInterval(updateClock, 1000);
 
@@ -765,8 +789,9 @@ async function api(params) {
   const url = getUrl();
   if (!url) throw new Error('Chưa cài URL Apps Script. Vào ⚙ Cài đặt.');
   const res  = await fetch(`${url}?${new URLSearchParams(params)}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
-  if (data.error) throw new Error(data.error);
+  if (data && data.error) throw new Error(data.error);
   return data;
 }
 async function apiPost(body) {
@@ -779,24 +804,40 @@ async function apiPost(body) {
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch(e) { throw new Error('Response không hợp lệ'); }
-  if (data.error) throw new Error(data.error);
+  if (data && data.error) throw new Error(data.error);
   return data;
 }
 
-// ══ ABORT CONTROLLER — Fix race condition ════════════════════
-// Mỗi "slot" tab có 1 AbortController riêng
-// Khi bấm tab mới cùng slot → abort request cũ → không render đè
-const _abort = {};
-function getAbortSignal(slot) {
-  if (_abort[slot]) _abort[slot].abort();
-  _abort[slot] = new AbortController();
-  return _abort[slot].signal;
-}
-function isAborted(slot) {
-  return _abort[slot] && _abort[slot].signal.aborted;
+// ══ ABORT CONTROLLERS ════════════════════════════════════════
+const _ac = {};
+function newSignal(slot) {
+  if (_ac[slot]) _ac[slot].abort();
+  _ac[slot] = new AbortController();
+  return _ac[slot].signal;
 }
 
-// ══ INIT DATE INPUTS ═════════════════════════════════════════
+// ══ FETCH HELPERS (stale-while-revalidate) ════════════════════
+// fetch() trả về { data, fromCache }
+// Nếu cache còn fresh → trả ngay, không gọi API
+// Nếu cache stale hoặc rỗng → gọi API, cập nhật cache
+
+async function fetchKey(cacheKey, apiParams, signal) {
+  const cached = mcGet(cacheKey);
+  if (mcFresh(cacheKey)) return { data: cached, fromCache: true };
+  try {
+    const fresh = await api(apiParams);
+    if (signal && signal.aborted) return { data: cached, fromCache: true };
+    const list = Array.isArray(fresh) ? fresh : (cached || []);
+    mcSet(cacheKey, list);
+    hideOfflineBanner();
+    return { data: list, fromCache: false };
+  } catch(e) {
+    if (!navigator.onLine) showOfflineBanner();
+    return { data: cached || [], fromCache: true, error: e.message };
+  }
+}
+
+// ══ INIT INPUTS ══════════════════════════════════════════════
 document.getElementById('pos-timein').value = new Date().toTimeString().slice(0,5);
 document.getElementById('hist-date').value  = isoToday();
 document.getElementById('dash-date').value  = isoToday();
@@ -809,22 +850,17 @@ function goPage(id, el) {
   if (pg) pg.classList.add('active');
   if (el) el.classList.add('active');
 
-  // Mỗi tab dùng hàm render đồng bộ ngay (sync) từ CACHE
-  // rồi kick off async fetch riêng — abort controller ngăn race condition
-  if (id === 'history')   { renderHistoryTable(CACHE.invoices); fetchHistory(); }
+  if (id === 'history')   pageHistory();
   if (id === 'inventory') renderInventory();
-  if (id === 'staff')     { renderStaff(CACHE.invoices); fetchStaffInvoices(); }
+  if (id === 'staff')     pageStaff();
   if (id === 'customers') renderCusts();
-  if (id === 'dashboard') { renderDashboardData(CACHE.invoices); fetchDashboard(); }
-  if (id === 'monthly')   loadMonthlyPage();
+  if (id === 'dashboard') pageDashboard();
+  if (id === 'monthly')   pageMonthly();
   if (id === 'settings')  loadConfigForm();
 }
 
 // ══ SETUP BANNER ═════════════════════════════════════════════
-function checkSetupBanner() {
-  if (!getUrl()) document.getElementById('setup-banner').classList.add('show');
-}
-checkSetupBanner();
+if (!getUrl()) document.getElementById('setup-banner')?.classList.add('show');
 function saveScriptUrl() {
   const url = document.getElementById('setup-url').value.trim();
   if (!url.startsWith('http')) { toast('URL không hợp lệ','error'); return; }
@@ -835,355 +871,84 @@ function saveScriptUrl() {
 }
 
 // ══ SYNC ALL ═════════════════════════════════════════════════
-// syncAll là nguồn sự thật duy nhất cho CACHE.invoices
-// Không có hàm nào khác được ghi CACHE.invoices ngoài đây
+// Tải master data + invoices hôm nay
+// Dùng Promise.allSettled — 1 fail không ảnh hưởng cái khác
 async function syncAll() {
-  if (!cfg.scriptUrl) return;
+  if (!getUrl()) return;
   setSyncing(true);
-  try {
-    const now = new Date();
-    const thisM = now.getMonth() + 1;
-    const thisY = now.getFullYear();
-    const prevM = thisM === 1 ? 12 : thisM - 1;
-    const prevY = thisM === 1 ? thisY - 1 : thisY;
 
-    // FIX 7: Tải master data + invoices hôm nay + tháng này + tháng trước song song
-    const [svcs, staff, customers, inventory, todayInv, curMonth, prevMonth] = await Promise.all([
-      api({ action: 'getServices' }),
-      api({ action: 'getStaff' }),
-      api({ action: 'getCustomers' }),
-      api({ action: 'getInventory' }),
-      api({ action: 'getInvoices', date: todayStr() }),
-      api({ action: 'getInvoicesByMonth', month: thisM, year: thisY }),
-      api({ action: 'getInvoicesByMonth', month: prevM, year: prevY }),
-    ]);
+  const results = await Promise.allSettled([
+    api({ action: 'getServices' }),
+    api({ action: 'getStaff' }),
+    api({ action: 'getCustomers' }),
+    api({ action: 'getInventory' }),
+    api({ action: 'getInvoices', date: todayStr() }),
+  ]);
 
-    // Cập nhật master cache
-    CACHE.services  = Array.isArray(svcs)       ? svcs       : CACHE.services;
-    CACHE.staff     = Array.isArray(staff)       ? staff      : CACHE.staff;
-    CACHE.customers = Array.isArray(customers)   ? customers  : CACHE.customers;
-    CACHE.inventory = Array.isArray(inventory)   ? inventory  : CACHE.inventory;
-    cSave('services'); cSave('staff'); cSave('customers'); cSave('inventory');
+  const [svcs, staff, custs, inv, todayInv] = results;
 
-    // FIX 3: CHỈ syncAll được ghi CACHE.invoices
-    CACHE.invoices = Array.isArray(todayInv) ? todayInv : [];
+  if (svcs.status === 'fulfilled'     && Array.isArray(svcs.value))     mcSet(K.services,  svcs.value);
+  if (staff.status === 'fulfilled'    && Array.isArray(staff.value))    mcSet(K.staff,     staff.value);
+  if (custs.status === 'fulfilled'    && Array.isArray(custs.value))    mcSet(K.customers, custs.value);
+  if (inv.status === 'fulfilled'      && Array.isArray(inv.value))      mcSet(K.inventory, inv.value);
+  if (todayInv.status === 'fulfilled' && Array.isArray(todayInv.value)) mcSet(K.invToday(), todayInv.value);
 
-    // FIX 7: Lưu tháng vào localStorage để không bao giờ mất
-    if (Array.isArray(curMonth))  saveMonSum(thisM, thisY, curMonth);
-    if (Array.isArray(prevMonth)) saveMonSum(prevM, prevY, prevMonth);
+  const anyOk = results.some(r => r.status === 'fulfilled');
+  if (anyOk) { hideOfflineBanner(); toast('Đồng bộ thành công ✓','ok'); }
+  else        { if (!navigator.onLine) showOfflineBanner(); else toast('Không thể kết nối Sheets','error'); }
 
-    // Render trang đang active với dữ liệu mới
-    renderActivePage();
-    hideOfflineBanner();
-    toast('Đồng bộ thành công ✓', 'ok');
-  } catch(e) {
-    // Mất internet hoặc lỗi API
-    if (!navigator.onLine || e.message.includes('fetch') || e.message.includes('network')) {
-      showOfflineBanner();
-    } else {
-      toast('Lỗi đồng bộ: ' + e.message, 'error');
-    }
-    renderActivePage(); // Vẫn render từ cache cũ
-  }
+  // Render lại trang đang active
+  const activeId = document.querySelector('.page.active')?.id?.replace('page-','');
+  if (activeId) renderPageSync(activeId);
+
   setSyncing(false);
 }
 
-// Render trang đang active với dữ liệu đã có trong CACHE (không gọi API)
-function renderActivePage() {
-  const active = document.querySelector('.page.active');
-  if (!active) return;
-  const id = active.id.replace('page-', '');
+// Render đồng bộ từ cache (không gọi API) — dùng sau syncAll hoặc checkout
+function renderPageSync(id) {
   if (id === 'pos')       { renderServiceGrid(); renderOrder(); updateStaffSelect(); updateCustDatalist(); }
-  if (id === 'history')   renderHistoryTable(CACHE.invoices);
+  if (id === 'history')   renderHistoryTable(C.invoices);
   if (id === 'inventory') renderInventory();
-  if (id === 'staff')     renderStaff(CACHE.invoices);
+  if (id === 'staff')     renderStaff(C.invoices);
   if (id === 'customers') renderCusts();
-  if (id === 'dashboard') renderDashboardData(CACHE.invoices);
-  if (id === 'monthly')   renderMonthFromCache(); // dùng cache localStorage
+  if (id === 'dashboard') renderDashboardData(C.invoices);
+  if (id === 'monthly')   renderMonthFromCache();
 }
 
 // Auto-refresh mỗi 5 phút
-setInterval(() => { if (cfg.scriptUrl && navigator.onLine) syncAll(); }, 5 * 60 * 1000);
+setInterval(() => { if (getUrl() && navigator.onLine) syncAll(); }, 5*60*1000);
 
-// ══ FETCH HELPERS (abort-safe, không ghi CACHE.invoices) ════
-// FIX 1+3: Các hàm này dùng biến local, không đụng CACHE.invoices
-
-async function fetchHistory() {
-  const signal  = getAbortSignal('history');
+// ══ PAGE: HISTORY ════════════════════════════════════════════
+async function pageHistory() {
+  const signal  = newSignal('history');
   const dateStr = isoToDmy(document.getElementById('hist-date').value);
-  try {
-    const data = await api({ action:'getInvoices', date: dateStr });
-    if (signal.aborted) return; // FIX 1: bị cancel, không render
-    const list = Array.isArray(data) ? data : [];
-    // FIX 7: Lưu ngày đã tải để không mất
-    const key = `spa_inv_${dateStr.replace(/\//g,'-')}`;
-    localStorage.setItem(key, JSON.stringify(list));
-    // Nếu là hôm nay → cập nhật CACHE.invoices (qua syncAll pattern)
-    // Nhưng KHÔNG ghi đè nếu syncAll đang chạy → dùng biến riêng
-    _histData = list;
-    renderHistoryTable(list);
-    hideOfflineBanner();
-  } catch(e) {
-    if (signal.aborted) return;
-    if (!navigator.onLine) showOfflineBanner();
-    // Thử đọc từ localStorage
-    const key = `spa_inv_${dateStr.replace(/\//g,'-')}`;
-    const saved = localStorage.getItem(key);
-    if (saved) { _histData = JSON.parse(saved); renderHistoryTable(_histData); }
-  }
-}
+  const cacheKey = K.invDate(dateStr);
 
-async function fetchStaffInvoices() {
-  const signal = getAbortSignal('staff');
-  try {
-    const data = await api({ action:'getInvoices', date: todayStr() });
-    if (signal.aborted) return;
-    const list = Array.isArray(data) ? data : [];
-    // Cập nhật CACHE.invoices vì đây là hôm nay — đồng bộ với syncAll
-    CACHE.invoices = list;
-    renderStaff(list);
-    hideOfflineBanner();
-  } catch(e) {
-    if (signal.aborted) return;
-    if (!navigator.onLine) showOfflineBanner();
-    renderStaff(CACHE.invoices);
-  }
-}
-
-async function fetchDashboard() {
-  const signal  = getAbortSignal('dashboard');
-  const dateStr = isoToDmy(document.getElementById('dash-date')?.value || '');
-  try {
-    const data = await api({ action:'getInvoices', date: dateStr });
-    if (signal.aborted) return;
-    const list = Array.isArray(data) ? data : [];
-    if (dateStr === todayStr()) CACHE.invoices = list;
-    renderDashboardData(list);
-    hideOfflineBanner();
-  } catch(e) {
-    if (signal.aborted) return;
-    if (!navigator.onLine) showOfflineBanner();
-    renderDashboardData(CACHE.invoices);
-  }
-}
-
-// ══ POS: SERVICE GRID ════════════════════════════════════════
-let selected = {};
-
-function renderServiceGrid() {
-  const svcs  = CACHE.services.filter(s => s.type === 'dịch vụ');
-  const prods = CACHE.services.filter(s => s.type === 'bán lẻ');
-  const invMap = {};
-  CACHE.inventory.forEach(i => { invMap[i.id] = i; });
-  const loading = document.getElementById('svc-loading');
-  const grid    = document.getElementById('svc-grid');
-  const pSec    = document.getElementById('prod-section');
-  const pGrid   = document.getElementById('prod-grid');
-  if (!svcs.length && !prods.length) {
-    loading.textContent = 'Chưa có dịch vụ. Nhấn Đồng bộ để tải.';
-    loading.style.display = ''; grid.style.display = 'none'; pSec.style.display = 'none';
-    return;
-  }
-  loading.style.display = 'none'; grid.style.display = '';
-  grid.innerHTML = svcs.map(s => `
-    <div class="svc-card ${selected[s.id]?'selected':''}" onclick="toggleSvc('${s.id}')" id="sc-${s.id}">
-      <div class="svc-name">${s.name}</div>
-      <div class="svc-price">${fmt(s.price)}</div>
-      <div class="svc-dur">${s.dur ? s.dur+' phút' : ''}</div>
-    </div>`).join('');
-  if (prods.length) {
-    pSec.style.display = '';
-    pGrid.innerHTML = prods.map(p => {
-      const inv = invMap[p.id]; const out = inv && inv.stock <= 0;
-      return `<div class="svc-card ${selected[p.id]?'selected':''} ${out?'out-of-stock':''}" onclick="toggleSvc('${p.id}')" id="sc-${p.id}">
-        <div class="svc-name">${p.name}</div>
-        <div class="svc-price">${fmt(p.price)}</div>
-        <div class="svc-dur">Tồn: ${inv?inv.stock:'?'} ${p.unit||''}${out?' ⚠️':''}</div>
-      </div>`;
-    }).join('');
-  } else pSec.style.display = 'none';
-}
-
-function toggleSvc(id) {
-  const svc = CACHE.services.find(s => s.id == id);
-  const inv = CACHE.inventory.find(i => i.id == id);
-  if (svc?.type==='bán lẻ' && inv && inv.stock<=0) { toast('Sản phẩm đã hết hàng','error'); return; }
-  selected[id] = selected[id] ? 0 : 1;
-  if (!selected[id]) delete selected[id];
-  document.getElementById('sc-'+id)?.classList.toggle('selected', !!selected[id]);
-  renderOrder();
-}
-function changeQty(id, delta) { selected[id] = Math.max(1,(selected[id]||1)+delta); renderOrder(); }
-
-function renderOrder() {
-  const items = Object.keys(selected).map(id => {
-    const s = CACHE.services.find(x => x.id==id);
-    return s ? {...s, qty: selected[id]} : null;
-  }).filter(Boolean);
-  if (!items.length) {
-    document.getElementById('order-items').innerHTML = '<div class="empty" style="padding:1.2rem">Chưa chọn dịch vụ</div>';
-    recalc(); return;
-  }
-  document.getElementById('order-items').innerHTML = items.map(it => `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:.45rem 0;border-bottom:1px solid var(--border)">
-      <div><div style="font-size:.86rem;font-weight:500">${it.name}</div><div style="font-size:.73rem;color:var(--muted)">${fmt(it.price)} × ${it.qty}</div></div>
-      <div style="display:flex;align-items:center;gap:.3rem">
-        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem" onclick="changeQty('${it.id}',-1)">−</button>
-        <span style="min-width:18px;text-align:center;font-weight:500">${it.qty}</span>
-        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem" onclick="changeQty('${it.id}',1)">+</button>
-        <span style="font-weight:600;color:var(--rose-dark);min-width:75px;text-align:right">${fmt(it.price*it.qty)}</span>
-      </div>
-    </div>`).join('');
-  recalc();
-}
-
-function recalc() {
-  let sub = 0;
-  Object.keys(selected).forEach(id => {
-    const s = CACHE.services.find(x => x.id==id);
-    if (s) sub += s.price * (selected[id]||1);
-  });
-  const disc = parseFloat(document.getElementById('pos-disc').value)||0;
-  const afterDisc = sub * (1-disc/100);
-  const vat   = afterDisc * VAT_RATE();
-  const total = afterDisc + vat;
-  document.getElementById('sub-disp').textContent   = fmt(sub);
-  document.getElementById('vat-disp').textContent   = fmt(vat);
-  document.getElementById('total-disp').textContent = fmt(total);
-  return {sub, disc, afterDisc, vat, total};
-}
-
-function updateStaffSelect() {
-  const sel = document.getElementById('pos-staff');
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">-- Chọn nhân viên --</option>' +
-    CACHE.staff.map(s=>`<option value="${s.id}" ${s.id==cur?'selected':''}>${s.name} (HH ${s.commission}%)</option>`).join('');
-}
-function updateCustDatalist() {
-  document.getElementById('cust-dl').innerHTML =
-    CACHE.customers.map(c=>`<option value="${c.name}" data-phone="${c.phone}">`).join('');
-}
-function onCustInput() {
-  const name = document.getElementById('pos-cname').value;
-  const c = CACHE.customers.find(x => x.name===name);
-  if (c) document.getElementById('pos-phone').value = c.phone;
-}
-
-// ══ CHECKOUT ═════════════════════════════════════════════════
-async function checkout() {
-  const cname   = document.getElementById('pos-cname').value.trim();
-  const staffId = document.getElementById('pos-staff').value;
-  if (!cname)   { toast('Nhập tên khách hàng','error'); return; }
-  if (!staffId) { toast('Chọn nhân viên thực hiện','error'); return; }
-  if (!Object.keys(selected).length) { toast('Chọn ít nhất 1 dịch vụ','error'); return; }
-
-  const staff  = CACHE.staff.find(s => s.id==staffId);
-  const cust   = CACHE.customers.find(c => c.name===cname);
-  const {sub, disc, afterDisc, vat, total} = recalc();
-  const commission = total * (staff.commission/100);
-  const items  = Object.keys(selected).map(id => {
-    const s = CACHE.services.find(x=>x.id==id);
-    return {...s, qty: selected[id]};
-  }).filter(Boolean);
-
-  const payload = { action:'saveInvoice', data:{
-    customerId: cust?.id||'', customerName: cname,
-    customerPhone: document.getElementById('pos-phone').value,
-    staffId: staff.id, staffName: staff.name, staffCommissionRate: staff.commission,
-    timeIn: document.getElementById('pos-timein').value,
-    timeOut: new Date().toTimeString().slice(0,5),
-    subtotal:sub, discount:disc, afterDiscount:afterDisc, vat, total, commission,
-    payment: document.getElementById('pos-payment').value,
-    note: document.getElementById('pos-note').value,
-    items,
-  }};
-
-  showLoading('Đang lưu hoá đơn lên Google Sheets...');
-  try {
-    const res = await apiPost(payload);
-    hideLoading();
-
-    // Cập nhật tồn kho local
-    items.filter(it=>it.type==='bán lẻ').forEach(it=>{
-      const inv = CACHE.inventory.find(i=>i.id==it.id);
-      if (inv) inv.stock = Math.max(0, inv.stock-it.qty);
+  // Bước 1: Hiện stale data ngay nếu có
+  const stale = mcGet(cacheKey);
+  if (stale) {
+    renderHistoryTable(stale);
+  } else {
+    document.getElementById('hist-body').innerHTML =
+      '<tr><td colspan="9" class="empty">⏳ Đang tải từ Sheets...</td></tr>';
+    ['h-count','h-rev','h-cash','h-transfer'].forEach(id => {
+      document.getElementById(id).textContent = '...';
     });
-    cSave('inventory');
-
-    // Thêm invoice mới vào CACHE.invoices (hôm nay)
-    const newInv = {
-      ...payload.data, invoiceNo: res.invoiceNo, date: todayStr(),
-      total: Number(total), commission: Number(commission),
-    };
-    CACHE.invoices.unshift(newInv);
-
-    // Cập nhật khách hàng local
-    if (cust) {
-      cust.totalSpent = (cust.totalSpent||0) + total;
-      cust.visits     = (cust.visits||0) + 1;
-      cust.lastVisit  = todayStr();
-    } else {
-      CACHE.customers.push({ id:'CUS_'+Date.now(), name:cname,
-        phone: document.getElementById('pos-phone').value,
-        visits:1, totalSpent:total, lastVisit:todayStr(), tier:'Đồng', skin:'', allergy:'' });
-    }
-    cSave('customers');
-
-    // Hiển thị hoá đơn TRƯỚC — sync, không async, không đóng modal
-    showInvoice({...payload.data, invoiceNo:res.invoiceNo}, staff);
-    toast('Lưu thành công! Hoá đơn đã ghi vào Sheets ✓','ok');
-
-    // Reset POS
-    selected = {};
-    document.getElementById('pos-cname').value = '';
-    document.getElementById('pos-phone').value = '';
-    document.getElementById('pos-note').value  = '';
-    document.getElementById('pos-disc').value  = '0';
-    document.getElementById('pos-timein').value = new Date().toTimeString().slice(0,5);
-    renderServiceGrid(); renderOrder();
-
-    // Refresh tabs khác — tất cả sync từ CACHE đã cập nhật
-    renderHistoryTable(CACHE.invoices);
-    renderStaff(CACHE.invoices);
-    renderDashboardData(CACHE.invoices);
-
-  } catch(e) {
-    hideLoading();
-    toast('Lỗi lưu: '+e.message,'error');
   }
+
+  // Bước 2: Fetch mới (luôn fetch để đảm bảo fresh)
+  setTabLoading('history', true);
+  const { data } = await fetchKey(cacheKey, { action:'getInvoices', date: dateStr }, signal);
+  setTabLoading('history', false);
+  if (signal.aborted) return;
+  renderHistoryTable(data);
 }
 
-// ══ INVOICE MODAL ════════════════════════════════════════════
-function showInvoice(d, staff) {
-  document.getElementById('inv-spa-name').textContent = SPA_NAME();
-  document.getElementById('inv-spa-addr').textContent = SPA_ADDR();
-  document.getElementById('inv-info').innerHTML = `
-    <div class="lbl">Số HĐ</div><div class="val">${d.invoiceNo||'—'}</div>
-    <div class="lbl">Ngày</div><div class="val">${todayStr()}</div>
-    <div class="lbl">Khách hàng</div><div class="val">${d.customerName}</div>
-    <div class="lbl">SĐT</div><div class="val">${d.customerPhone||'—'}</div>
-    <div class="lbl">Giờ vào</div><div class="val">${d.timeIn}</div>
-    <div class="lbl">Giờ ra</div><div class="val">${d.timeOut}</div>
-    <div class="lbl">Nhân viên</div><div class="val">${d.staffName}</div>
-    <div class="lbl">Thanh toán</div><div class="val">${d.payment}</div>`;
-  document.getElementById('inv-items').innerHTML = (d.items||[]).map(it=>`
-    <tr><td>${it.name}</td><td style="text-align:center">${it.qty}</td>
-    <td style="text-align:right">${fmt(it.price)}</td>
-    <td style="text-align:right;font-weight:500">${fmt(it.price*it.qty)}</td></tr>`).join('');
-  document.getElementById('inv-sub').textContent      = fmt(d.subtotal);
-  document.getElementById('inv-disc-lbl').textContent = `Chiết khấu (${d.discount}%)`;
-  document.getElementById('inv-disc-val').textContent = d.discount>0 ? `-${fmt(d.subtotal*d.discount/100)}` : '—';
-  document.getElementById('inv-vat').textContent      = fmt(d.vat);
-  document.getElementById('inv-total').textContent    = fmt(d.total);
-  openModal('invoice-modal');
-}
-
-// ══ HISTORY ══════════════════════════════════════════════════
 let _histData = [];
-
 function renderHistoryTable(data) {
   _histData = Array.isArray(data) ? data : [];
   const body = document.getElementById('hist-body');
+  if (!body) return;
   if (!_histData.length) {
     body.innerHTML = '<tr><td colspan="9" class="empty">Không có giao dịch</td></tr>';
     document.getElementById('h-count').textContent    = '0';
@@ -1192,96 +957,140 @@ function renderHistoryTable(data) {
     document.getElementById('h-transfer').textContent = '0đ';
     return;
   }
-  body.innerHTML = _histData.map((t,i)=>`
+  body.innerHTML = _histData.map((t,i) => `
     <tr>
       <td><span class="badge b-rose">${i+1}</span></td>
       <td>${t.timeIn||''}</td><td>${t.timeOut||''}</td>
-      <td><div style="font-weight:500">${t.customerName}</div><div style="font-size:.73rem;color:var(--muted)">${t.customerPhone||''}</div></td>
-      <td style="max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${(t.items||[]).map(it=>it.name).join(', ')||'—'}</td>
+      <td><div style="font-weight:500">${t.customerName}</div>
+          <div style="font-size:.73rem;color:var(--muted)">${t.customerPhone||''}</div></td>
+      <td style="max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          ${(t.items||[]).map(it=>it.name).join(', ')||'—'}</td>
       <td>${t.staffName||''}</td>
       <td style="font-weight:600;color:var(--rose-dark)">${fmt(t.total)}</td>
       <td><span class="badge b-teal">${t.payment||''}</span></td>
       <td><button class="btn btn-ghost btn-sm" onclick="reInvoice(${i})">🧾</button></td>
     </tr>`).join('');
-  const total = _histData.reduce((s,t)=>s+(Number(t.total)||0),0);
+  const total = _histData.reduce((s,t) => s+(Number(t.total)||0), 0);
   const cash  = _histData.filter(t=>t.payment==='Tiền mặt').reduce((s,t)=>s+(Number(t.total)||0),0);
   document.getElementById('h-count').textContent    = _histData.length;
   document.getElementById('h-rev').textContent      = fmt(total);
   document.getElementById('h-cash').textContent     = fmt(cash);
   document.getElementById('h-transfer').textContent = fmt(total-cash);
 }
-
 function reInvoice(i) {
   const t = _histData[i]; if (!t) return;
-  showInvoice({...t, invoiceNo:t.invoiceNo, items:t.items||[]}, {});
+  showInvoice({...t, items:t.items||[]}, {name: t.staffName});
 }
 function exportCSV() {
   if (!_histData.length) { toast('Không có dữ liệu','error'); return; }
   const rows = [['STT','Ngày','Giờ vào','Giờ ra','Khách','SĐT','Dịch vụ','Nhân viên','Tổng','Thanh toán']];
-  _histData.forEach((t,i)=>rows.push([i+1,t.date,t.timeIn,t.timeOut,t.customerName,t.customerPhone||'',(t.items||[]).map(x=>x.name).join('|'),t.staffName,t.total,t.payment]));
+  _histData.forEach((t,i) => rows.push([
+    i+1,t.date,t.timeIn,t.timeOut,t.customerName,t.customerPhone||'',
+    (t.items||[]).map(x=>x.name).join('|'),t.staffName,t.total,t.payment
+  ]));
   const csv = rows.map(r=>r.map(v=>`"${v}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,\uFEFF' + encodeURIComponent(csv);
   a.download = `spa-${document.getElementById('hist-date').value}.csv`;
   a.click();
 }
 
-// ══ DASHBOARD ════════════════════════════════════════════════
+// ══ PAGE: DASHBOARD ══════════════════════════════════════════
+async function pageDashboard() {
+  const signal  = newSignal('dashboard');
+  const dateStr = isoToDmy(document.getElementById('dash-date')?.value || '');
+  const cacheKey = K.invDate(dateStr);
+
+  // Bước 1: Stale data ngay
+  const stale = mcGet(cacheKey);
+  if (stale) {
+    renderDashboardData(stale);
+  } else {
+    ['d-rev','d-comm'].forEach(id => document.getElementById(id).textContent = '...');
+    ['d-cnt','d-low'].forEach(id  => document.getElementById(id).textContent = '...');
+    document.getElementById('top-svcs').innerHTML   = '<div class="empty">⏳ Đang tải...</div>';
+    document.getElementById('staff-bars').innerHTML = '<div class="empty">⏳ Đang tải...</div>';
+  }
+
+  // Bước 2: Fetch fresh
+  setTabLoading('dashboard', true);
+  const { data } = await fetchKey(cacheKey, { action:'getInvoices', date: dateStr }, signal);
+  setTabLoading('dashboard', false);
+  if (signal.aborted) return;
+  renderDashboardData(data);
+}
+
 function renderDashboardData(data) {
   data = Array.isArray(data) ? data : [];
   const rev      = data.reduce((s,t)=>s+(Number(t.total)||0),0);
   const comm     = data.reduce((s,t)=>s+(Number(t.commission)||0),0);
-  const lowStock = CACHE.inventory.filter(i=>i.stock<=i.min&&i.min>0).length;
+  const lowStock = C.inventory.filter(i=>i.stock<=i.min&&i.min>0).length;
+  const dateStr  = isoToDmy(document.getElementById('dash-date')?.value||'');
   document.getElementById('d-rev').textContent  = fmt(rev);
   document.getElementById('d-cnt').textContent  = data.length;
   document.getElementById('d-comm').textContent = fmt(comm);
   document.getElementById('d-low').textContent  = lowStock;
-  document.getElementById('d-date').textContent = isoToDmy(document.getElementById('dash-date')?.value||'');
+  document.getElementById('d-date').textContent = dateStr;
 
   const svcMap = {};
   data.forEach(inv=>(inv.items||[]).forEach(it=>{
-    svcMap[it.name]=(svcMap[it.name]||0)+(Number(it.qty)||1);
+    svcMap[it.name] = (svcMap[it.name]||0)+(Number(it.qty)||1);
   }));
   const topSvcs = Object.entries(svcMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
   document.getElementById('top-svcs').innerHTML = topSvcs.length
     ? topSvcs.map(([name,qty])=>`
         <div style="margin-bottom:.8rem">
-          <div style="display:flex;justify-content:space-between;font-size:.83rem"><span>${name}</span><strong>${qty}</strong></div>
+          <div style="display:flex;justify-content:space-between;font-size:.83rem">
+            <span>${name}</span><strong>${qty}</strong></div>
           <div class="bar-wrap"><div class="bar-fill" style="width:${Math.min(qty*15,100)}%"></div></div>
         </div>`).join('')
     : '<div class="empty">Chưa có dữ liệu</div>';
 
   const staffMap = {};
   data.forEach(inv=>{ staffMap[inv.staffName]=(staffMap[inv.staffName]||0)+(Number(inv.total)||0); });
-  const maxRev = Math.max(...Object.values(staffMap),1);
+  const maxRev = Math.max(...Object.values(staffMap), 1);
   document.getElementById('staff-bars').innerHTML = Object.keys(staffMap).length
     ? Object.entries(staffMap).map(([name,rev])=>`
         <div style="margin-bottom:.9rem">
-          <div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:.25rem"><span>${name}</span><strong>${fmt(rev)}</strong></div>
+          <div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:.25rem">
+            <span>${name}</span><strong>${fmt(rev)}</strong></div>
           <div class="bar-wrap"><div class="bar-fill" style="width:${(rev/maxRev)*100}%"></div></div>
         </div>`).join('')
     : '<div class="empty">Chưa có dữ liệu</div>';
 }
 
-// ══ STAFF ════════════════════════════════════════════════════
+// ══ PAGE: STAFF ═══════════════════════════════════════════════
+async function pageStaff() {
+  const signal = newSignal('staff');
+
+  // Bước 1: Render ngay từ cache
+  renderStaff(C.invoices);
+
+  // Bước 2: Fetch invoices hôm nay để có data mới nhất
+  setTabLoading('staff', true);
+  const { data } = await fetchKey(K.invToday(), { action:'getInvoices', date: todayStr() }, signal);
+  setTabLoading('staff', false);
+  if (signal.aborted) return;
+  renderStaff(data);
+}
+
 function renderStaff(txns) {
-  txns = Array.isArray(txns) ? txns : CACHE.invoices;
-  const staff   = CACHE.staff;
-  const revMap  = {}, cntMap = {}, commMap = {};
-  txns.forEach(t=>{
-    revMap[t.staffName]  = (revMap[t.staffName] ||0) + (Number(t.total)||0);
-    cntMap[t.staffName]  = (cntMap[t.staffName] ||0) + 1;
-    commMap[t.staffName] = (commMap[t.staffName]||0) + (Number(t.total)||0) * ((staff.find(s=>s.name===t.staffName)?.commission||0)/100);
+  txns = Array.isArray(txns) ? txns : [];
+  const staff   = C.staff;
+  const revMap={}, cntMap={}, commMap={};
+  txns.forEach(t => {
+    revMap[t.staffName]  = (revMap[t.staffName] ||0)+(Number(t.total)||0);
+    cntMap[t.staffName]  = (cntMap[t.staffName] ||0)+1;
+    commMap[t.staffName] = (commMap[t.staffName]||0)+(Number(t.total)||0)*((staff.find(s=>s.name===t.staffName)?.commission||0)/100);
   });
-  const totalComm = Object.values(commMap).reduce((s,v)=>s+v,0);
-  const totalRev  = Object.values(revMap).reduce((s,v)=>s+v,0);
-  document.getElementById('s-comm').textContent = fmt(totalComm);
-  document.getElementById('s-rev').textContent  = fmt(totalRev);
+  document.getElementById('s-comm').textContent = fmt(Object.values(commMap).reduce((s,v)=>s+v,0));
+  document.getElementById('s-rev').textContent  = fmt(Object.values(revMap).reduce((s,v)=>s+v,0));
   document.getElementById('comm-list').innerHTML = staff.length ? staff.map(s=>`
     <div class="comm-row">
       <div style="display:flex;align-items:center;gap:.55rem">
-        <div class="avatar">${s.name.split(' ').slice(-1)[0]?.[0]||'?'}</div>
-        <div><div style="font-weight:500">${s.name}</div><div style="font-size:.72rem;color:var(--muted)">${s.role}</div></div>
+        <div class="avatar">${s.name.split(' ').pop()?.[0]||'?'}</div>
+        <div><div style="font-weight:500">${s.name}</div>
+             <div style="font-size:.72rem;color:var(--muted)">${s.role}</div></div>
       </div>
       <div style="text-align:right">${cntMap[s.name]||0}</div>
       <div style="text-align:right">${revMap[s.name]?fmt(revMap[s.name]):'—'}</div>
@@ -1301,46 +1110,281 @@ function renderStaff(txns) {
 }
 
 async function saveStaff() {
-  const d = { name:document.getElementById('st-name').value.trim(), role:document.getElementById('st-role').value.trim(),
-    phone:document.getElementById('st-phone').value.trim(), salary:parseInt(document.getElementById('st-salary').value)||0,
-    commission:parseFloat(document.getElementById('st-comm').value)||0, startDate:document.getElementById('st-date').value };
+  const d = {
+    name:       document.getElementById('st-name').value.trim(),
+    role:       document.getElementById('st-role').value.trim(),
+    phone:      document.getElementById('st-phone').value.trim(),
+    salary:     parseInt(document.getElementById('st-salary').value)||0,
+    commission: parseFloat(document.getElementById('st-comm').value)||0,
+    startDate:  document.getElementById('st-date').value,
+  };
   if (!d.name) { toast('Nhập tên nhân viên','error'); return; }
   showLoading('Đang lưu...');
   try {
-    const res = await apiPost({action:'addStaff',data:d});
-    d.id = res.id; CACHE.staff.push(d); cSave('staff');
-    updateStaffSelect(); closeModal('add-staff-modal'); renderStaff(CACHE.invoices);
+    const res = await apiPost({action:'addStaff', data:d});
+    d.id = res.id;
+    const newList = [...C.staff, d];
+    mcSet(K.staff, newList);
+    updateStaffSelect();
+    closeModal('add-staff-modal');
+    renderStaff(C.invoices);
     toast('Đã thêm nhân viên','ok');
   } catch(e) { toast('Lỗi: '+e.message,'error'); }
   hideLoading();
 }
 async function delStaff(id) {
-  if (!confirm('Xoá nhân viên này?')) return; showLoading();
+  if (!confirm('Xoá nhân viên này?')) return;
+  showLoading();
   try {
-    await apiPost({action:'deleteStaff',id});
-    CACHE.staff = CACHE.staff.filter(s=>s.id!=id); cSave('staff');
-    updateStaffSelect(); renderStaff(CACHE.invoices); toast('Đã xoá','ok');
+    await apiPost({action:'deleteStaff', id});
+    mcSet(K.staff, C.staff.filter(s=>s.id!=id));
+    updateStaffSelect();
+    renderStaff(C.invoices);
+    toast('Đã xoá','ok');
   } catch(e) { toast('Lỗi: '+e.message,'error'); }
   hideLoading();
 }
 
-// ══ INVENTORY ════════════════════════════════════════════════
-let _invFilter = 'all';
-function renderInventory(filter) {
-  if (filter!==undefined) _invFilter = filter;
-  let items = CACHE.services.map(s=>{
-    const inv = CACHE.inventory.find(i=>i.id===s.id);
-    return {...s, stock:inv?.stock??(s.type==='dịch vụ'?null:0), invMin:inv?.min??3, status:inv?.status??''};
+// ══ POS ══════════════════════════════════════════════════════
+let selected = {};
+
+function renderServiceGrid() {
+  const svcs  = C.services.filter(s=>s.type==='dịch vụ');
+  const prods = C.services.filter(s=>s.type==='bán lẻ');
+  const invMap = {};
+  C.inventory.forEach(i=>{ invMap[i.id]=i; });
+  const loading = document.getElementById('svc-loading');
+  const grid    = document.getElementById('svc-grid');
+  const pSec    = document.getElementById('prod-section');
+  const pGrid   = document.getElementById('prod-grid');
+  if (!svcs.length && !prods.length) {
+    loading.textContent = 'Chưa có dịch vụ. Nhấn Đồng bộ để tải.';
+    loading.style.display=''; grid.style.display='none'; pSec.style.display='none'; return;
+  }
+  loading.style.display='none'; grid.style.display='';
+  grid.innerHTML = svcs.map(s=>`
+    <div class="svc-card ${selected[s.id]?'selected':''}" onclick="toggleSvc('${s.id}')" id="sc-${s.id}">
+      <div class="svc-name">${s.name}</div>
+      <div class="svc-price">${fmt(s.price)}</div>
+      <div class="svc-dur">${s.dur?s.dur+' phút':''}</div>
+    </div>`).join('');
+  if (prods.length) {
+    pSec.style.display='';
+    pGrid.innerHTML = prods.map(p=>{
+      const inv=invMap[p.id]; const out=inv&&inv.stock<=0;
+      return `<div class="svc-card ${selected[p.id]?'selected':''} ${out?'out-of-stock':''}"
+               onclick="toggleSvc('${p.id}')" id="sc-${p.id}">
+        <div class="svc-name">${p.name}</div>
+        <div class="svc-price">${fmt(p.price)}</div>
+        <div class="svc-dur">Tồn: ${inv?inv.stock:'?'} ${p.unit||''}${out?' ⚠️':''}</div>
+      </div>`;
+    }).join('');
+  } else pSec.style.display='none';
+}
+
+function toggleSvc(id) {
+  const svc = C.services.find(s=>s.id==id);
+  const inv = C.inventory.find(i=>i.id==id);
+  if (svc?.type==='bán lẻ' && inv && inv.stock<=0) { toast('Sản phẩm đã hết hàng','error'); return; }
+  selected[id] = selected[id] ? 0 : 1;
+  if (!selected[id]) delete selected[id];
+  document.getElementById('sc-'+id)?.classList.toggle('selected', !!selected[id]);
+  renderOrder();
+}
+function changeQty(id, delta) { selected[id]=Math.max(1,(selected[id]||1)+delta); renderOrder(); }
+
+function renderOrder() {
+  const items = Object.keys(selected).map(id=>{
+    const s=C.services.find(x=>x.id==id);
+    return s?{...s,qty:selected[id]}:null;
+  }).filter(Boolean);
+  if (!items.length) {
+    document.getElementById('order-items').innerHTML =
+      '<div class="empty" style="padding:1.2rem">Chưa chọn dịch vụ</div>';
+    recalc(); return;
+  }
+  document.getElementById('order-items').innerHTML = items.map(it=>`
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:.45rem 0;border-bottom:1px solid var(--border)">
+      <div><div style="font-size:.86rem;font-weight:500">${it.name}</div>
+           <div style="font-size:.73rem;color:var(--muted)">${fmt(it.price)} × ${it.qty}</div></div>
+      <div style="display:flex;align-items:center;gap:.3rem">
+        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem" onclick="changeQty('${it.id}',-1)">−</button>
+        <span style="min-width:18px;text-align:center;font-weight:500">${it.qty}</span>
+        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem" onclick="changeQty('${it.id}',1)">+</button>
+        <span style="font-weight:600;color:var(--rose-dark);min-width:75px;text-align:right">${fmt(it.price*it.qty)}</span>
+      </div>
+    </div>`).join('');
+  recalc();
+}
+
+function recalc() {
+  let sub=0;
+  Object.keys(selected).forEach(id=>{
+    const s=C.services.find(x=>x.id==id);
+    if (s) sub += s.price*(selected[id]||1);
   });
-  const alerts = document.getElementById('inv-alerts');
-  const low = items.filter(p=>p.type==='bán lẻ'&&p.stock!==null&&p.stock<=p.invMin);
-  alerts.innerHTML = low.map(p=>`
+  const disc=parseFloat(document.getElementById('pos-disc').value)||0;
+  const afterDisc=sub*(1-disc/100);
+  const vat=afterDisc*VAT_RATE();
+  const total=afterDisc+vat;
+  document.getElementById('sub-disp').textContent   = fmt(sub);
+  document.getElementById('vat-disp').textContent   = fmt(vat);
+  document.getElementById('total-disp').textContent = fmt(total);
+  return {sub,disc,afterDisc,vat,total};
+}
+
+function updateStaffSelect() {
+  const sel=document.getElementById('pos-staff');
+  const cur=sel.value;
+  sel.innerHTML='<option value="">-- Chọn nhân viên --</option>'+
+    C.staff.map(s=>`<option value="${s.id}" ${s.id==cur?'selected':''}>${s.name} (HH ${s.commission}%)</option>`).join('');
+}
+function updateCustDatalist() {
+  document.getElementById('cust-dl').innerHTML =
+    C.customers.map(c=>`<option value="${c.name}" data-phone="${c.phone}">`).join('');
+}
+function onCustInput() {
+  const name=document.getElementById('pos-cname').value;
+  const c=C.customers.find(x=>x.name===name);
+  if (c) document.getElementById('pos-phone').value=c.phone;
+}
+
+// ══ CHECKOUT ════════════════════════════════════════════════
+async function checkout() {
+  const cname   = document.getElementById('pos-cname').value.trim();
+  const staffId = document.getElementById('pos-staff').value;
+  if (!cname)   { toast('Nhập tên khách hàng','error'); return; }
+  if (!staffId) { toast('Chọn nhân viên thực hiện','error'); return; }
+  if (!Object.keys(selected).length) { toast('Chọn ít nhất 1 dịch vụ','error'); return; }
+
+  const staff  = C.staff.find(s=>s.id==staffId);
+  const cust   = C.customers.find(c=>c.name===cname);
+  const {sub,disc,afterDisc,vat,total} = recalc();
+  const commission = total*(staff.commission/100);
+  const items = Object.keys(selected).map(id=>{
+    const s=C.services.find(x=>x.id==id);
+    return {...s, qty:selected[id]};
+  }).filter(Boolean);
+
+  const payload = { action:'saveInvoice', data:{
+    customerId:    cust?.id||'',
+    customerName:  cname,
+    customerPhone: document.getElementById('pos-phone').value,
+    staffId:       staff.id,
+    staffName:     staff.name,
+    staffCommissionRate: staff.commission,
+    timeIn:   document.getElementById('pos-timein').value,
+    timeOut:  new Date().toTimeString().slice(0,5),
+    subtotal: sub, discount:disc, afterDiscount:afterDisc, vat, total, commission,
+    payment:  document.getElementById('pos-payment').value,
+    note:     document.getElementById('pos-note').value,
+    items,
+  }};
+
+  showLoading('Đang lưu hoá đơn lên Google Sheets...');
+  try {
+    const res = await apiPost(payload);
+    hideLoading();
+
+    // Cập nhật inventory cache
+    items.filter(it=>it.type==='bán lẻ').forEach(it=>{
+      const inv=C.inventory.find(i=>i.id==it.id);
+      if (inv) inv.stock=Math.max(0,inv.stock-it.qty);
+    });
+    mcSet(K.inventory, C.inventory);
+
+    // Thêm invoice mới vào cache hôm nay
+    const newInv = {
+      ...payload.data,
+      invoiceNo: res.invoiceNo,
+      date:      todayStr(),
+      total:     Number(total),
+      commission:Number(commission),
+    };
+    const updatedInvoices = [newInv, ...C.invoices];
+    mcSet(K.invToday(), updatedInvoices);
+
+    // Cập nhật customers cache
+    if (cust) {
+      cust.totalSpent = (cust.totalSpent||0)+total;
+      cust.visits     = (cust.visits||0)+1;
+      cust.lastVisit  = todayStr();
+    } else {
+      C.customers.push({
+        id:'CUS_'+Date.now(), name:cname,
+        phone:document.getElementById('pos-phone').value,
+        visits:1, totalSpent:total, lastVisit:todayStr(), tier:'Đồng', skin:'', allergy:'',
+      });
+    }
+    mcSet(K.customers, C.customers);
+
+    // Hiện hoá đơn
+    showInvoice({...payload.data, invoiceNo:res.invoiceNo}, staff);
+    toast('Lưu thành công! ✓','ok');
+
+    // Reset POS
+    selected={};
+    document.getElementById('pos-cname').value='';
+    document.getElementById('pos-phone').value='';
+    document.getElementById('pos-note').value='';
+    document.getElementById('pos-disc').value='0';
+    document.getElementById('pos-timein').value=new Date().toTimeString().slice(0,5);
+    renderServiceGrid(); renderOrder();
+
+    // Refresh các tab khác từ cache đã cập nhật
+    renderHistoryTable(C.invoices);
+    renderStaff(C.invoices);
+    renderDashboardData(C.invoices);
+
+  } catch(e) {
+    hideLoading();
+    toast('Lỗi lưu: '+e.message,'error');
+  }
+}
+
+// ══ INVOICE MODAL ════════════════════════════════════════════
+function showInvoice(d, staff) {
+  document.getElementById('inv-spa-name').textContent = SPA_NAME();
+  document.getElementById('inv-spa-addr').textContent = SPA_ADDR();
+  document.getElementById('inv-info').innerHTML = `
+    <div class="lbl">Số HĐ</div>     <div class="val">${d.invoiceNo||'—'}</div>
+    <div class="lbl">Ngày</div>      <div class="val">${todayStr()}</div>
+    <div class="lbl">Khách hàng</div><div class="val">${d.customerName}</div>
+    <div class="lbl">SĐT</div>       <div class="val">${d.customerPhone||'—'}</div>
+    <div class="lbl">Giờ vào</div>   <div class="val">${d.timeIn}</div>
+    <div class="lbl">Giờ ra</div>    <div class="val">${d.timeOut}</div>
+    <div class="lbl">Nhân viên</div> <div class="val">${d.staffName}</div>
+    <div class="lbl">Thanh toán</div><div class="val">${d.payment}</div>`;
+  document.getElementById('inv-items').innerHTML = (d.items||[]).map(it=>`
+    <tr><td>${it.name}</td>
+        <td style="text-align:center">${it.qty}</td>
+        <td style="text-align:right">${fmt(it.price)}</td>
+        <td style="text-align:right;font-weight:500">${fmt(it.price*it.qty)}</td></tr>`).join('');
+  document.getElementById('inv-sub').textContent      = fmt(d.subtotal);
+  document.getElementById('inv-disc-lbl').textContent = `Chiết khấu (${d.discount}%)`;
+  document.getElementById('inv-disc-val').textContent = d.discount>0?`-${fmt(d.subtotal*d.discount/100)}`:'—';
+  document.getElementById('inv-vat').textContent      = fmt(d.vat);
+  document.getElementById('inv-total').textContent    = fmt(d.total);
+  openModal('invoice-modal');
+}
+
+// ══ INVENTORY ════════════════════════════════════════════════
+let _invFilter='all';
+function renderInventory(filter) {
+  if (filter!==undefined) _invFilter=filter;
+  let items=C.services.map(s=>{
+    const inv=C.inventory.find(i=>i.id===s.id);
+    return {...s, stock:inv?.stock??(s.type==='dịch vụ'?null:0), invMin:inv?.min??3};
+  });
+  const alerts=document.getElementById('inv-alerts');
+  const low=items.filter(p=>p.type==='bán lẻ'&&p.stock!==null&&p.stock<=p.invMin);
+  alerts.innerHTML=low.map(p=>`
     <div class="alert ${p.stock<=0?'alert-danger':'alert-warn'}">
       ${p.stock<=0?'🔴':'⚠️'} <strong>${p.name}</strong> — Tồn: ${p.stock} ${p.unit||''} (tối thiểu: ${p.invMin})
     </div>`).join('');
-  if (_invFilter==='sắp hết') items = low;
-  else if (_invFilter!=='all') items = items.filter(p=>p.type===_invFilter);
-  document.getElementById('inv-body').innerHTML = items.length ? items.map(p=>`
+  if (_invFilter==='sắp hết') items=low;
+  else if (_invFilter!=='all') items=items.filter(p=>p.type===_invFilter);
+  document.getElementById('inv-body').innerHTML=items.length?items.map(p=>`
     <tr>
       <td style="font-weight:500">${p.name}</td>
       <td><span class="badge ${p.type==='bán lẻ'?'b-teal':'b-rose'}">${p.type==='bán lẻ'?'Bán lẻ':'Dịch vụ'}</span></td>
@@ -1354,33 +1398,37 @@ function renderInventory(filter) {
       <td>${p.type==='bán lẻ'?p.invMin:'—'}</td>
       <td>${p.type==='bán lẻ'?`<span class="badge ${p.stock<=0?'b-red':p.stock<=p.invMin?'b-amber':'b-green'}">${p.stock<=0?'Hết hàng':p.stock<=p.invMin?'Sắp hết':'Còn hàng'}</span>`:'<span class="badge b-gray">Dịch vụ</span>'}</td>
       <td><button class="btn btn-danger btn-sm" onclick="delSvc('${p.id}')">Xoá</button></td>
-    </tr>`).join('') : '<tr><td colspan="9" class="empty">Không có dữ liệu</td></tr>';
+    </tr>`).join(''):'<tr><td colspan="9" class="empty">Không có dữ liệu</td></tr>';
 }
 function filterInv(type,el) {
   document.querySelectorAll('.itab').forEach(t=>t.classList.remove('active'));
   el.classList.add('active'); renderInventory(type);
 }
 async function adjStock(id,delta) {
-  const inv = CACHE.inventory.find(i=>i.id==id); if (!inv) return;
-  inv.stock = Math.max(0,inv.stock+delta);
-  inv.status = inv.stock<=0?'Hết hàng':inv.stock<=inv.min?'Sắp hết':'Còn hàng';
-  cSave('inventory'); renderInventory(); renderServiceGrid();
+  const invList=[...C.inventory];
+  const inv=invList.find(i=>i.id==id); if (!inv) return;
+  inv.stock=Math.max(0,inv.stock+delta);
+  inv.status=inv.stock<=0?'Hết hàng':inv.stock<=inv.min?'Sắp hết':'Còn hàng';
+  mcSet(K.inventory,invList); renderInventory(); renderServiceGrid();
   try { await apiPost({action:'updateStock',id,delta}); } catch(e) { toast('Lỗi cập nhật kho','error'); }
 }
 async function saveSvc() {
-  const d = { name:document.getElementById('sv-name').value.trim(), type:document.getElementById('sv-type').value,
-    unit:document.getElementById('sv-unit').value.trim()||'Buổi', price:parseInt(document.getElementById('sv-price').value)||0,
-    cost:parseInt(document.getElementById('sv-cost').value)||0, dur:parseInt(document.getElementById('sv-dur').value)||0,
-    stock:parseInt(document.getElementById('sv-stock').value)||0, min:parseInt(document.getElementById('sv-min').value)||3 };
+  const d={
+    name:  document.getElementById('sv-name').value.trim(),
+    type:  document.getElementById('sv-type').value,
+    unit:  document.getElementById('sv-unit').value.trim()||'Buổi',
+    price: parseInt(document.getElementById('sv-price').value)||0,
+    cost:  parseInt(document.getElementById('sv-cost').value)||0,
+    dur:   parseInt(document.getElementById('sv-dur').value)||0,
+    stock: parseInt(document.getElementById('sv-stock').value)||0,
+    min:   parseInt(document.getElementById('sv-min').value)||3,
+  };
   if (!d.name) { toast('Nhập tên dịch vụ/sản phẩm','error'); return; }
   showLoading('Đang lưu...');
   try {
-    const res = await apiPost({action:'addService',data:d}); d.id = res.id;
-    CACHE.services.push(d); cSave('services');
-    if (d.type==='bán lẻ') {
-      CACHE.inventory.push({id:res.id,name:d.name,type:d.type,unit:d.unit,stock:d.stock,min:d.min,status:d.stock<=d.min?'Sắp hết':'Còn hàng'});
-      cSave('inventory');
-    }
+    const res=await apiPost({action:'addService',data:d}); d.id=res.id;
+    mcSet(K.services,[...C.services,d]);
+    if (d.type==='bán lẻ') mcSet(K.inventory,[...C.inventory,{id:res.id,name:d.name,type:d.type,unit:d.unit,stock:d.stock,min:d.min,status:d.stock<=d.min?'Sắp hết':'Còn hàng'}]);
     closeModal('add-svc-modal'); renderInventory(); renderServiceGrid(); toast('Đã thêm','ok');
   } catch(e) { toast('Lỗi: '+e.message,'error'); }
   hideLoading();
@@ -1389,133 +1437,131 @@ async function delSvc(id) {
   if (!confirm('Xoá dịch vụ/sản phẩm này?')) return; showLoading('Đang xoá...');
   try {
     await apiPost({action:'deleteService',id});
-    CACHE.services  = CACHE.services.filter(s=>s.id!=id);
-    CACHE.inventory = CACHE.inventory.filter(i=>i.id!=id);
-    cSave('services'); cSave('inventory'); renderInventory(); renderServiceGrid(); toast('Đã xoá','ok');
+    mcSet(K.services, C.services.filter(s=>s.id!=id));
+    mcSet(K.inventory,C.inventory.filter(i=>i.id!=id));
+    renderInventory(); renderServiceGrid(); toast('Đã xoá','ok');
   } catch(e) { toast('Lỗi: '+e.message,'error'); }
   hideLoading();
 }
 function toggleStockFields() {
-  document.getElementById('stock-fields').style.display = document.getElementById('sv-type').value==='bán lẻ'?'':'none';
+  document.getElementById('stock-fields').style.display=document.getElementById('sv-type').value==='bán lẻ'?'':'none';
 }
 toggleStockFields();
 
 // ══ CUSTOMERS ════════════════════════════════════════════════
 function renderCusts() {
-  const q = (document.getElementById('cust-q')?.value||'').toLowerCase();
-  const list = CACHE.customers.filter(c=>c.name.toLowerCase().includes(q)||(c.phone||'').includes(q));
-  document.getElementById('cust-body').innerHTML = list.length ? list.map(c=>`
+  const q=(document.getElementById('cust-q')?.value||'').toLowerCase();
+  const list=C.customers.filter(c=>c.name.toLowerCase().includes(q)||(c.phone||'').includes(q));
+  document.getElementById('cust-body').innerHTML=list.length?list.map(c=>`
     <tr>
       <td style="font-weight:500">${c.name}</td><td>${c.phone}</td>
-      <td>${c.skin||'—'}</td><td style="font-size:.8rem;color:var(--muted)">${c.allergy||'Không'}</td>
+      <td>${c.skin||'—'}</td>
+      <td style="font-size:.8rem;color:var(--muted)">${c.allergy||'Không'}</td>
       <td><span class="badge ${c.totalSpent>5000000?'b-rose':c.totalSpent>2000000?'b-amber':'b-gray'}">${c.totalSpent>5000000?'Vàng':c.totalSpent>2000000?'Bạc':'Đồng'}</span></td>
       <td style="font-weight:600;color:var(--rose-dark)">${fmt(c.totalSpent||0)}</td>
       <td>${c.lastVisit||'Chưa đến'}</td><td>${c.visits||0}</td>
-    </tr>`).join('') : '<tr><td colspan="8" class="empty">Không tìm thấy</td></tr>';
+    </tr>`).join(''):'<tr><td colspan="8" class="empty">Không tìm thấy</td></tr>';
 }
 async function saveCust() {
-  const d = { name:document.getElementById('cu-name').value.trim(), phone:document.getElementById('cu-phone').value.trim(),
-    dob:document.getElementById('cu-dob').value, skin:document.getElementById('cu-skin').value,
-    allergy:document.getElementById('cu-allergy').value.trim()||'Không' };
+  const d={
+    name:    document.getElementById('cu-name').value.trim(),
+    phone:   document.getElementById('cu-phone').value.trim(),
+    dob:     document.getElementById('cu-dob').value,
+    skin:    document.getElementById('cu-skin').value,
+    allergy: document.getElementById('cu-allergy').value.trim()||'Không',
+  };
   if (!d.name) { toast('Nhập tên khách hàng','error'); return; }
   showLoading('Đang lưu...');
   try {
-    const res = await apiPost({action:'addCustomer',data:d});
+    const res=await apiPost({action:'addCustomer',data:d});
     d.id=res.id; d.totalSpent=0; d.visits=0; d.lastVisit='';
-    CACHE.customers.push(d); cSave('customers'); updateCustDatalist();
-    closeModal('add-cust-modal'); renderCusts(); toast('Đã thêm khách hàng','ok');
+    mcSet(K.customers,[...C.customers,d]);
+    updateCustDatalist(); closeModal('add-cust-modal'); renderCusts(); toast('Đã thêm khách hàng','ok');
   } catch(e) { toast('Lỗi: '+e.message,'error'); }
   hideLoading();
 }
 
-// ══ MONTHLY PAGE ═════════════════════════════════════════════
-let _mv = { m: new Date().getMonth()+1, y: new Date().getFullYear() };
-let _isYearView = false;
+// ══ PAGE: MONTHLY ════════════════════════════════════════════
+let _mv={m:new Date().getMonth()+1, y:new Date().getFullYear()};
+let _isYearView=false;
 
 function monthNav(delta) {
-  if (_isYearView) { _mv.y += delta; }
+  if (_isYearView) { _mv.y+=delta; }
   else {
-    _mv.m += delta;
-    if (_mv.m > 12) { _mv.m = 1; _mv.y++; }
-    if (_mv.m < 1)  { _mv.m = 12; _mv.y--; }
+    _mv.m+=delta;
+    if (_mv.m>12){_mv.m=1;_mv.y++;}
+    if (_mv.m<1) {_mv.m=12;_mv.y--;}
   }
-  loadMonthlyPage();
+  pageMonthly();
 }
 function toggleYearView() {
-  _isYearView = !_isYearView;
-  document.getElementById('btn-year-view').textContent = _isYearView ? 'Theo tháng' : 'Cả năm';
-  document.getElementById('monthly-view').style.display = _isYearView ? 'none' : '';
-  document.getElementById('year-view').style.display    = _isYearView ? '' : 'none';
-  loadMonthlyPage();
+  _isYearView=!_isYearView;
+  document.getElementById('btn-year-view').textContent=_isYearView?'Theo tháng':'Cả năm';
+  document.getElementById('monthly-view').style.display=_isYearView?'none':'';
+  document.getElementById('year-view').style.display=_isYearView?'':'none';
+  pageMonthly();
 }
 
-async function loadMonthlyPage() {
+async function pageMonthly() {
   if (_isYearView) {
-    document.getElementById('month-label').textContent = `Năm ${_mv.y}`;
-    await loadYearView(_mv.y);
+    document.getElementById('month-label').textContent=`Năm ${_mv.y}`;
+    await _loadYearView(_mv.y);
   } else {
-    document.getElementById('month-label').textContent = `Tháng ${_mv.m}/${_mv.y}`;
-    await loadMonthView(_mv.m, _mv.y);
+    document.getElementById('month-label').textContent=`Tháng ${_mv.m}/${_mv.y}`;
+    await _loadMonthView(_mv.m,_mv.y);
   }
 }
 
-// Render monthly từ cache localStorage (không gọi API)
 function renderMonthFromCache() {
   if (_isYearView) {
-    const cur  = loadYrSum(_mv.y)   || [];
-    const prev = loadYrSum(_mv.y-1) || [];
-    if (cur.length || prev.length) renderYearView(_mv.y);
+    const cur=mcGet(K.yrSum(_mv.y))||[];
+    const prev=mcGet(K.yrSum(_mv.y-1))||[];
+    if (cur.length||prev.length) _renderYearView(_mv.y);
   } else {
-    const cur  = loadMonSum(_mv.m, _mv.y) || [];
-    const prevM = _mv.m===1?12:_mv.m-1, prevY = _mv.m===1?_mv.y-1:_mv.y;
-    const prev = loadMonSum(prevM, prevY) || [];
-    if (cur.length || prev.length) _renderMonthView(_mv.m, _mv.y, cur, prev);
+    const {prevM,prevY}=_prevMonth(_mv.m,_mv.y);
+    const cur=mcGet(K.monSum(_mv.m,_mv.y))||[];
+    const prev=mcGet(K.monSum(prevM,prevY))||[];
+    if (cur.length||prev.length) _renderMonthView(_mv.m,_mv.y,cur,prev);
   }
 }
 
-async function loadMonthView(m, y) {
-  const signal = getAbortSignal('monthly');
-  const prevM  = m===1?12:m-1, prevY=m===1?y-1:y;
+function _prevMonth(m,y){return m===1?{prevM:12,prevY:y-1}:{prevM:m-1,prevY:y};}
 
-  // Hiện cache ngay nếu có
-  const cachedCur  = loadMonSum(m, y);
-  const cachedPrev = loadMonSum(prevM, prevY);
-  if (cachedCur !== null) {
-    _renderMonthView(m, y, cachedCur, cachedPrev||[]);
+async function _loadMonthView(m,y) {
+  const signal=newSignal('monthly');
+  const {prevM,prevY}=_prevMonth(m,y);
+  const kCur=K.monSum(m,y), kPrev=K.monSum(prevM,prevY);
+
+  // Stale data ngay
+  const staleCur=mcGet(kCur), stalePrev=mcGet(kPrev);
+  if (staleCur) {
+    _renderMonthView(m,y,staleCur,stalePrev||[]);
   } else {
-    document.getElementById('monthly-loading').style.display = '';
-    document.getElementById('monthly-view').style.display = 'none';
+    document.getElementById('monthly-loading').style.display='';
+    document.getElementById('monthly-view').style.display='none';
   }
 
-  if (!navigator.onLine) { showOfflineBanner(); document.getElementById('monthly-loading').style.display='none'; document.getElementById('monthly-view').style.display=''; return; }
+  if (!navigator.onLine){showOfflineBanner();document.getElementById('monthly-loading').style.display='none';document.getElementById('monthly-view').style.display='';return;}
 
-  try {
-    const [curData, prevData] = await Promise.all([
-      api({action:'getInvoicesByMonth', month:m, year:y}),
-      api({action:'getInvoicesByMonth', month:prevM, year:prevY}),
-    ]);
-    if (signal.aborted) return;
-    const cur  = Array.isArray(curData)  ? curData  : [];
-    const prev = Array.isArray(prevData) ? prevData : [];
-    // FIX 7: Lưu vào localStorage
-    saveMonSum(m, y, cur);
-    saveMonSum(prevM, prevY, prev);
-    document.getElementById('monthly-loading').style.display = 'none';
-    document.getElementById('monthly-view').style.display = '';
-    _renderMonthView(m, y, cur, prev);
-    hideOfflineBanner();
-  } catch(e) {
-    if (signal.aborted) return;
-    if (!navigator.onLine) showOfflineBanner();
-    else toast('Lỗi tải tháng: '+e.message,'error');
-    document.getElementById('monthly-loading').style.display = 'none';
-    document.getElementById('monthly-view').style.display = '';
-  }
+  setTabLoading('monthly',true);
+  const [rCur,rPrev]=await Promise.allSettled([
+    fetchKey(kCur, {action:'getInvoicesByMonth',month:m,year:y},    signal),
+    fetchKey(kPrev,{action:'getInvoicesByMonth',month:prevM,year:prevY},signal),
+  ]);
+  setTabLoading('monthly',false);
+  if (signal.aborted) return;
+
+  const cur  = rCur.status==='fulfilled'  ? rCur.value.data  : (staleCur||[]);
+  const prev = rPrev.status==='fulfilled' ? rPrev.value.data : (stalePrev||[]);
+
+  document.getElementById('monthly-loading').style.display='none';
+  document.getElementById('monthly-view').style.display='';
+  _renderMonthView(m,y,cur,prev);
 }
 
-function _renderMonthView(m, y, cur, prev) {
-  cur  = Array.isArray(cur)  ? cur  : [];
-  prev = Array.isArray(prev) ? prev : [];
+function _renderMonthView(m,y,cur,prev) {
+  cur=Array.isArray(cur)?cur:[];
+  prev=Array.isArray(prev)?prev:[];
   const curRev  = cur.reduce((s,t)=>s+(Number(t.total)||0),0);
   const prevRev = prev.reduce((s,t)=>s+(Number(t.total)||0),0);
   const curComm = cur.reduce((s,t)=>s+(Number(t.commission)||0),0);
@@ -1523,55 +1569,50 @@ function _renderMonthView(m, y, cur, prev) {
   document.getElementById('m-cnt').textContent      = cur.length;
   document.getElementById('m-comm').textContent     = fmt(curComm);
   document.getElementById('m-prev-rev').textContent = fmt(prevRev);
-  document.getElementById('m-rev-trend').innerHTML  = trendHtml(curRev, prevRev);
-  document.getElementById('m-cnt-trend').innerHTML  = trendHtml(cur.length, prev.length);
+  document.getElementById('m-rev-trend').innerHTML  = trendHtml(curRev,prevRev);
+  document.getElementById('m-cnt-trend').innerHTML  = trendHtml(cur.length,prev.length);
   document.getElementById('m-comm-trend').innerHTML = '';
 
   // Biểu đồ từng ngày
-  const days = daysInMonth(m, y);
-  const dayMap = {};
-  cur.forEach(inv => {
-    const d = inv.date ? inv.date.split('/')[0] : null;
-    if (d) dayMap[d] = (dayMap[d]||0) + (Number(inv.total)||0);
-  });
-  const maxDay = Math.max(...Object.values(dayMap), 1);
-  let barsHtml = '';
-  for (let d=1; d<=days; d++) {
-    const ds  = String(d).padStart(2,'0');
-    const val = dayMap[ds] || 0;
-    const h   = Math.round((val/maxDay)*100);
-    barsHtml += `<div class="chart-bar-col" title="${ds}/${String(m).padStart(2,'0')}: ${fmt(val)}">
+  const days=daysInMonth(m,y);
+  const dayMap={};
+  cur.forEach(inv=>{const d=inv.date?inv.date.split('/')[0]:null; if(d)dayMap[d]=(dayMap[d]||0)+(Number(inv.total)||0);});
+  const maxDay=Math.max(...Object.values(dayMap),1);
+  let barsHtml='';
+  for(let d=1;d<=days;d++){
+    const ds=String(d).padStart(2,'0');
+    const val=dayMap[ds]||0;
+    const h=Math.round((val/maxDay)*100);
+    barsHtml+=`<div class="chart-bar-col" title="${ds}/${String(m).padStart(2,'0')}: ${fmt(val)}">
       <div class="chart-bar" style="height:${h}%;background:${val?'var(--rose)':'var(--rose-pale)'}"></div>
       <div class="chart-bar-lbl">${d%5===0||d===1?d:''}</div>
     </div>`;
   }
-  document.getElementById('daily-bars').innerHTML = barsHtml;
+  document.getElementById('daily-bars').innerHTML=barsHtml;
 
   // Top dịch vụ
-  const svcMap = {};
-  cur.forEach(inv=>(inv.items||[]).forEach(it=>{
-    svcMap[it.name]=(svcMap[it.name]||0)+(Number(it.qty)||1);
-  }));
-  const topSvcs = Object.entries(svcMap).sort((a,b)=>b[1]-a[1]).slice(0,6);
-  const maxSvc  = Math.max(...topSvcs.map(x=>x[1]),1);
-  document.getElementById('m-top-svcs').innerHTML = topSvcs.length
-    ? topSvcs.map(([name,qty])=>`
+  const svcMap={};
+  cur.forEach(inv=>(inv.items||[]).forEach(it=>{svcMap[it.name]=(svcMap[it.name]||0)+(Number(it.qty)||1);}));
+  const topSvcs=Object.entries(svcMap).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  const maxSvc=Math.max(...topSvcs.map(x=>x[1]),1);
+  document.getElementById('m-top-svcs').innerHTML=topSvcs.length
+    ?topSvcs.map(([name,qty])=>`
         <div style="margin-bottom:.7rem">
           <div style="display:flex;justify-content:space-between;font-size:.82rem"><span>${name}</span><strong>${qty}</strong></div>
           <div class="bar-wrap"><div class="bar-fill" style="width:${(qty/maxSvc)*100}%"></div></div>
         </div>`).join('')
-    : '<div class="empty">Chưa có dữ liệu</div>';
+    :'<div class="empty">Chưa có dữ liệu</div>';
 
   // Nhân viên
-  const staffMap={}, commMap2={}, cntMap={};
+  const staffMap={},commMap2={},cntMap={};
   cur.forEach(inv=>{
-    staffMap[inv.staffName] = (staffMap[inv.staffName]||0)+(Number(inv.total)||0);
-    commMap2[inv.staffName] = (commMap2[inv.staffName]||0)+(Number(inv.commission)||0);
-    cntMap[inv.staffName]   = (cntMap[inv.staffName]||0)+1;
+    staffMap[inv.staffName]=(staffMap[inv.staffName]||0)+(Number(inv.total)||0);
+    commMap2[inv.staffName]=(commMap2[inv.staffName]||0)+(Number(inv.commission)||0);
+    cntMap[inv.staffName]  =(cntMap[inv.staffName]  ||0)+1;
   });
-  const maxStaff = Math.max(...Object.values(staffMap),1);
-  document.getElementById('m-staff').innerHTML = Object.keys(staffMap).length
-    ? Object.entries(staffMap).sort((a,b)=>b[1]-a[1]).map(([name,rev])=>`
+  const maxStaff=Math.max(...Object.values(staffMap),1);
+  document.getElementById('m-staff').innerHTML=Object.keys(staffMap).length
+    ?Object.entries(staffMap).sort((a,b)=>b[1]-a[1]).map(([name,rev])=>`
         <div style="margin-bottom:.85rem">
           <div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:.18rem">
             <span><strong>${name}</strong> <span style="color:var(--muted);font-size:.72rem">${cntMap[name]} lượt</span></span>
@@ -1580,68 +1621,53 @@ function _renderMonthView(m, y, cur, prev) {
           <div style="font-size:.72rem;color:var(--teal);margin-bottom:.25rem">HH: ${fmt(commMap2[name]||0)}</div>
           <div class="bar-wrap"><div class="bar-fill" style="width:${(rev/maxStaff)*100}%"></div></div>
         </div>`).join('')
-    : '<div class="empty">Chưa có dữ liệu</div>';
+    :'<div class="empty">Chưa có dữ liệu</div>';
 }
 
-async function loadYearView(y) {
-  const signal = getAbortSignal('year');
-  const cachedCur  = loadYrSum(y);
-  const cachedPrev = loadYrSum(y-1);
-  if (cachedCur !== null) {
-    renderYearView(y);
-  } else {
-    document.getElementById('monthly-loading').style.display = '';
-    document.getElementById('year-view').style.display = 'none';
-  }
+async function _loadYearView(y) {
+  const signal=newSignal('year');
+  const kCur=K.yrSum(y), kPrev=K.yrSum(y-1);
+  const staleCur=mcGet(kCur), stalePrev=mcGet(kPrev);
+  if (staleCur) { _renderYearView(y); }
+  else { document.getElementById('monthly-loading').style.display=''; document.getElementById('year-view').style.display='none'; }
+  if (!navigator.onLine){showOfflineBanner();document.getElementById('monthly-loading').style.display='none';document.getElementById('year-view').style.display='';return;}
 
-  if (!navigator.onLine) { showOfflineBanner(); document.getElementById('monthly-loading').style.display='none'; document.getElementById('year-view').style.display=''; return; }
+  setTabLoading('monthly',true);
+  const [rCur,rPrev]=await Promise.allSettled([
+    fetchKey(kCur, {action:'getInvoicesByYear',year:y},   signal),
+    fetchKey(kPrev,{action:'getInvoicesByYear',year:y-1}, signal),
+  ]);
+  setTabLoading('monthly',false);
+  if (signal.aborted) return;
 
-  try {
-    const [curYear, prevYear] = await Promise.all([
-      api({action:'getInvoicesByYear', year:y}),
-      api({action:'getInvoicesByYear', year:y-1}),
-    ]);
-    if (signal.aborted) return;
-    const cur  = Array.isArray(curYear)  ? curYear  : [];
-    const prev = Array.isArray(prevYear) ? prevYear : [];
-    saveYrSum(y, cur); saveYrSum(y-1, prev); // FIX 7
-    document.getElementById('monthly-loading').style.display = 'none';
-    document.getElementById('year-view').style.display = '';
-    renderYearView(y);
-    hideOfflineBanner();
-  } catch(e) {
-    if (signal.aborted) return;
-    if (!navigator.onLine) showOfflineBanner();
-    else toast('Lỗi tải năm: '+e.message,'error');
-    document.getElementById('monthly-loading').style.display = 'none';
-    document.getElementById('year-view').style.display = '';
-  }
+  document.getElementById('monthly-loading').style.display='none';
+  document.getElementById('year-view').style.display='';
+  _renderYearView(y);
 }
 
-function renderYearView(y) {
-  const cur  = loadYrSum(y)   || [];
-  const prev = loadYrSum(y-1) || [];
-  const curRevTotal  = cur.reduce((s,m)=>s+(Number(m.revenue)||0),0);
-  const prevRevTotal = prev.reduce((s,m)=>s+(Number(m.revenue)||0),0);
-  const curCntTotal  = cur.reduce((s,m)=>s+(Number(m.customers)||0),0);
-  const prevCntTotal = prev.reduce((s,m)=>s+(Number(m.customers)||0),0);
+function _renderYearView(y) {
+  const cur=mcGet(K.yrSum(y))||[];
+  const prev=mcGet(K.yrSum(y-1))||[];
+  const curRevTotal =cur.reduce((s,m)=>s+(Number(m.revenue)||0),0);
+  const prevRevTotal=prev.reduce((s,m)=>s+(Number(m.revenue)||0),0);
+  const curCntTotal =cur.reduce((s,m)=>s+(Number(m.customers)||0),0);
+  const prevCntTotal=prev.reduce((s,m)=>s+(Number(m.customers)||0),0);
   document.getElementById('y-rev').textContent      = fmt(curRevTotal);
   document.getElementById('y-cnt').textContent      = curCntTotal;
-  document.getElementById('y-rev-trend').innerHTML  = trendHtml(curRevTotal, prevRevTotal);
-  document.getElementById('y-cnt-trend').innerHTML  = trendHtml(curCntTotal, prevCntTotal);
+  document.getElementById('y-rev-trend').innerHTML  = trendHtml(curRevTotal,prevRevTotal);
+  document.getElementById('y-cnt-trend').innerHTML  = trendHtml(curCntTotal,prevCntTotal);
   document.getElementById('y-prev-rev').textContent = fmt(prevRevTotal);
   document.getElementById('y-prev-trend').innerHTML = `<span style="color:var(--muted)">Năm ${y-1}</span>`;
-  const bestMonth = cur.reduce((best,m)=>(m.revenue>best.revenue?m:best), {revenue:0,month:0});
-  document.getElementById('y-best-month').textContent = bestMonth.month ? `Tháng ${bestMonth.month}` : '—';
-  document.getElementById('y-best-rev').textContent   = bestMonth.month ? fmt(bestMonth.revenue) : '';
-  const MNAMES = ['T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'];
-  const allVals = [...cur.map(m=>m.revenue||0),...prev.map(m=>m.revenue||0)];
-  const maxVal  = Math.max(...allVals,1);
-  document.getElementById('year-bars').innerHTML = MNAMES.map((name,i)=>{
-    const cm = cur.find(m=>m.month===(i+1))  ||{revenue:0};
-    const pm = prev.find(m=>m.month===(i+1)) ||{revenue:0};
-    const ch = Math.round((cm.revenue/maxVal)*140);
-    const ph = Math.round((pm.revenue/maxVal)*140);
+  const bestMonth=cur.reduce((b,m)=>m.revenue>b.revenue?m:b,{revenue:0,month:0});
+  document.getElementById('y-best-month').textContent=bestMonth.month?`Tháng ${bestMonth.month}`:'—';
+  document.getElementById('y-best-rev').textContent  =bestMonth.month?fmt(bestMonth.revenue):'';
+  const MNAMES=['T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'];
+  const maxVal=Math.max(...cur.map(m=>m.revenue||0),...prev.map(m=>m.revenue||0),1);
+  document.getElementById('year-bars').innerHTML=MNAMES.map((name,i)=>{
+    const cm=cur.find(m=>m.month===(i+1))||{revenue:0};
+    const pm=prev.find(m=>m.month===(i+1))||{revenue:0};
+    const ch=Math.round((cm.revenue/maxVal)*140);
+    const ph=Math.round((pm.revenue/maxVal)*140);
     return `<div class="year-col" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
       <div style="width:100%;display:flex;gap:2px;align-items:flex-end;height:140px">
         <div class="year-bar cur" style="flex:1;height:${ch}px" title="Năm ${y} T${i+1}: ${fmt(cm.revenue)}"></div>
@@ -1652,7 +1678,7 @@ function renderYearView(y) {
   }).join('');
 }
 
-// ══ SETTINGS ═════════════════════════════════════════════════
+// ══ SETTINGS ════════════════════════════════════════════════
 function loadConfigForm() {
   document.getElementById('cfg-url').value       = cfg.scriptUrl||'';
   document.getElementById('cfg-spa-name').value  = cfg.spaName||'';
@@ -1672,20 +1698,20 @@ function saveConfig() {
   if (cfg.scriptUrl) syncAll();
 }
 
-// ══ MODAL UTILS ══════════════════════════════════════════════
+// ══ MODAL ════════════════════════════════════════════════════
 function openModal(id)  { document.getElementById(id).classList.add('open'); }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 document.querySelectorAll('.modal-overlay').forEach(el=>{
-  el.addEventListener('click', e=>{ if(e.target===el) el.classList.remove('open'); });
+  el.addEventListener('click',e=>{ if(e.target===el) el.classList.remove('open'); });
 });
 
-// ══ INIT — FIX 2: Không dùng DOM_ready, gọi trực tiếp ════
+// ══ INIT ════════════════════════════════════════════════════
 renderServiceGrid();
 renderOrder();
 updateStaffSelect();
 updateCustDatalist();
-// FIX 2: Gọi syncAll() ngay — không wrap trong DOM_ready
-if (cfg.scriptUrl) syncAll();
+// Gọi syncAll ngay — không wrap trong DOMContentLoaded
+if (getUrl()) syncAll();
 
 </script>
 </body>
