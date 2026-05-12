@@ -696,7 +696,7 @@ function goPage(id, el) {
   if (targetPage) targetPage.classList.add('active');
   if (el) el.classList.add('active');
 
-  // 2. Làm mới dữ liệu theo từng trang (Dùng đúng biến id)
+  // 2. Cập nhật dữ liệu tương ứng với từng trang
   if (id === 'history')   loadHistory();
   if (id === 'inventory') renderInventory();
   if (id === 'staff')     renderStaff();
@@ -723,27 +723,25 @@ function saveScriptUrl() {
 
 // ══ SYNC ALL ═════════════════════════════════════════════════
 async function syncAll() {
-  if (!getUrl()) { toast('Chưa cài URL — vào ⚙ Cài đặt','error'); return; }
-  setSyncing(true);
+  if(!cfg.scriptUrl) return;
+  toast('Đang đồng bộ...','info');
   try {
-    const [svcs, staff, custs, inv] = await Promise.all([
-      api({action:'getServices'}),
-      api({action:'getStaff'}),
-      api({action:'getCustomers'}),
-      api({action:'getInventory'}),
-    ]);
-    CACHE.services  = svcs;  cSave('services');
-    CACHE.staff     = staff; cSave('staff');
-    CACHE.customers = custs; cSave('customers');
-    CACHE.inventory = inv;   cSave('inventory');
-    renderServiceGrid();
-    updateStaffSelect();
-    updateCustDatalist();
-    toast('Đồng bộ thành công ✓','ok');
+    const res = await api({ action:'getAll' });
+    if(res) {
+      CACHE.invoices = res.invoices || [];
+      CACHE.inventory = res.inventory || [];
+      CACHE.staff = res.staff || [];
+      CACHE.customers = res.customers || [];
+
+      // DÒNG QUAN TRỌNG NHẤT: Lưu vào máy để reload không bị mất
+      localStorage.setItem('pm_cache', JSON.stringify(CACHE));
+      
+      renderAll();
+      toast('Đồng bộ thành công!','ok');
+    }
   } catch(e) {
-    toast('Lỗi: ' + e.message, 'error');
+    toast('Lỗi đồng bộ','err');
   }
-  setSyncing(false);
 }
 
 // ══ POS: SERVICE GRID ════════════════════════════════════════
