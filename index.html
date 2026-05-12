@@ -574,23 +574,37 @@ const VAT_RATE = () => (parseFloat(cfg.vat) || 8) / 100;
 const SPA_NAME = () => cfg.spaName || '🌸 Phương Mai';
 const SPA_ADDR = () => (cfg.address || '') + (cfg.spaPhone ? ' · ☎ ' + cfg.spaPhone : '');
 
-// ══ CACHE (localStorage fallback) ════════════════════════════
-const CACHE = {
-  invoices:  JSON.parse(localStorage.getItem('spa_c_invoices')  || '[]'),
-  customers: JSON.parse(localStorage.getItem('spa_c_customers') || '[]'),
-  inventory: JSON.parse(localStorage.getItem('spa_c_inventory') || '[]'),
-  staff:     JSON.parse(localStorage.getItem('spa_c_staff')     || '[]'),
-  services:  JSON.parse(localStorage.getItem('spa_c_services')  || '[]'),
-};
+// ══ CACHE ════════════════════════════════════════════════════
 const CKEY = {
-  services:  'spa_c_services',
-  staff:     'spa_c_staff',
-  customers: 'spa_c_customers',
-  inventory: 'spa_c_inventory',
-  invoices:  'spa_c_invoices',
+  services:       'spa_c_services',
+  staff:          'spa_c_staff',
+  customers:      'spa_c_customers',
+  inventory:      'spa_c_inventory',
+  invoices:       'spa_c_invoices',
+  invoicesByDate: 'spa_c_invoices_by_date',
 };
+
+const CACHE = {
+  services:  JSON.parse(localStorage.getItem(CKEY.services)  || '[]'),
+  staff:     JSON.parse(localStorage.getItem(CKEY.staff)     || '[]'),
+  customers: JSON.parse(localStorage.getItem(CKEY.customers) || '[]'),
+  inventory: JSON.parse(localStorage.getItem(CKEY.inventory) || '[]'),
+  invoices:  JSON.parse(localStorage.getItem(CKEY.invoices)  || '[]'),
+};
+
+// invoicesByDate: { "dd/MM/yyyy": [...] } — KHÔNG bao giờ ghi đè CACHE.invoices
+let invoicesByDate = JSON.parse(localStorage.getItem(CKEY.invoicesByDate) || '{}');
+
 function cSave(key) { localStorage.setItem(CKEY[key], JSON.stringify(CACHE[key])); }
-function cLoad(key) { const d = localStorage.getItem(CKEY[key]); if(d) CACHE[key] = JSON.parse(d); }
+function saveInvoiceDateCache() { localStorage.setItem(CKEY.invoicesByDate, JSON.stringify(invoicesByDate)); }
+
+// Lưu invoices hôm nay → đồng bộ cả CACHE.invoices và invoicesByDate
+function saveInvoicesToday(list) {
+  CACHE.invoices = list;
+  invoicesByDate[todayStr()] = list;
+  cSave('invoices');
+  saveInvoiceDateCache();
+}
 
 // ══ API ═══════════════════════════════════════════════════════
 async function api(params) {
@@ -726,7 +740,8 @@ function renderAll() {
   renderInventory();
   renderStaff();
   renderCusts();
-  loadDashboard();
+  renderHistoryTable(CACHE.invoices); // render history tab với dữ liệu hôm nay (đã có trong CACHE)
+  loadDashboard();                    // dashboard cũng đọc từ CACHE.invoices, không gọi API thêm
 }
 
 // ══ SYNC ALL ═════════════════════════════════════════════════
@@ -735,23 +750,28 @@ async function syncAll() {
   setSyncing(true);
   toast('Đang đồng bộ...', 'info');
   try {
-    // Gọi từng action riêng (backend không có getAll)
-    const [svcs, staff, customers, inventory] = await Promise.all([
+    // Lấy ngày hôm nay dạng dd/MM/yyyy để gọi getInvoices
+    const todayDD = todayStr();
+    const [svcs, staff, customers, inventory, todayInvoices] = await Promise.all([
       api({ action: 'getServices' }),
       api({ action: 'getStaff' }),
       api({ action: 'getCustomers' }),
       api({ action: 'getInventory' }),
+      api({ action: 'getInvoices', date: todayDD }),
     ]);
     CACHE.services  = Array.isArray(svcs)       ? svcs       : [];
     CACHE.staff     = Array.isArray(staff)       ? staff      : [];
     CACHE.customers = Array.isArray(customers)   ? customers  : [];
     CACHE.inventory = Array.isArray(inventory)   ? inventory  : [];
 
-    // Lưu đúng key riêng lẻ — đồng bộ với cách CACHE đọc lúc khởi động
-    localStorage.setItem('spa_c_services',  JSON.stringify(CACHE.services));
-    localStorage.setItem('spa_c_staff',     JSON.stringify(CACHE.staff));
-    localStorage.setItem('spa_c_customers', JSON.stringify(CACHE.customers));
-    localStorage.setItem('spa_c_inventory', JSON.stringify(CACHE.inventory));
+    // Lưu master data
+    cSave('services');
+    cSave('staff');
+    cSave('customers');
+    cSave('inventory');
+
+    // Lưu invoices hôm nay qua helper thống nhất
+    saveInvoicesToday(Array.isArray(todayInvoices) ? todayInvoices : []);
 
     renderAll();
     toast('Đồng bộ thành công!', 'ok');
@@ -940,7 +960,7 @@ async function checkout() {
     });
     cSave('inventory');
 
-    // Thêm invoice mới vào cache
+    // Thêm invoice mới vào cache và đồng bộ ngay
     const newInvoice = {
       ...payload.data,
       invoiceNo: res.invoiceNo,
@@ -950,11 +970,7 @@ async function checkout() {
       staffName: staff?.name || '',
       createdAt: Date.now(),
     };
-    CACHE.invoices.unshift(newInvoice);
-    cSave('invoices');
-    // Đồng bộ vào cache theo ngày
-    invoicesByDate[todayStr()] = CACHE.invoices;
-    saveInvoiceDateCache();
+    saveInvoicesToday([newInvoice, ...CACHE.invoices]);
 
     // Cập nhật khách hàng local
     if (custObj) {
@@ -1032,51 +1048,42 @@ function showInvoice(d, staff) {
 }
 
 // ══ HISTORY ══════════════════════════════════════════════════
-// Cache invoices theo ngày: { "dd/MM/yyyy": [...] }
-const INVOICE_DATE_CACHE_KEY = 'spa_c_invoices_by_date';
-let invoicesByDate = JSON.parse(localStorage.getItem(INVOICE_DATE_CACHE_KEY) || '{}');
-
-function saveInvoiceDateCache() {
-  localStorage.setItem(INVOICE_DATE_CACHE_KEY, JSON.stringify(invoicesByDate));
-}
-
 async function loadHistory() {
   const dateInput = document.getElementById('hist-date').value;
   const [y,m,day] = dateInput.split('-');
   const dateStr = `${day}/${m}/${y}`;
+  const isToday = (dateStr === todayStr());
 
-  // Dùng cache nếu đã có và là hôm nay hoặc ngày cũ
+  // Nếu là hôm nay: dùng CACHE.invoices (nguồn sự thật)
+  // Nếu ngày khác: dùng invoicesByDate, gọi API nếu chưa có cache
+  if (isToday) {
+    _histViewDate = dateStr;
+    renderHistoryTable(CACHE.invoices);
+    return;
+  }
+
   if (invoicesByDate[dateStr]) {
-    CACHE._histView = invoicesByDate[dateStr];
-    renderHistoryTable();
+    _histViewDate = dateStr;
+    renderHistoryTable(invoicesByDate[dateStr]);
     return;
   }
 
   document.getElementById('hist-body').innerHTML = '<tr><td colspan="9" class="empty">Đang tải...</td></tr>';
   try {
-    const data = await api({action:'getInvoices', date: dateStr});
-    invoicesByDate[dateStr] = data;
+    const data = await api({ action: 'getInvoices', date: dateStr });
+    invoicesByDate[dateStr] = Array.isArray(data) ? data : [];
     saveInvoiceDateCache();
-    // Chỉ cập nhật CACHE.invoices nếu đang xem hôm nay
-    if (dateStr === todayStr()) {
-      CACHE.invoices = data;
-      cSave('invoices');
-    }
-    // Dùng biến tạm để render, không ghi đè CACHE.invoices khi xem ngày khác
-    CACHE._histView = data;
-    renderHistoryTable();
+    _histViewDate = dateStr;
+    renderHistoryTable(invoicesByDate[dateStr]);
   } catch(e) {
-    if (dateStr === todayStr() && CACHE.invoices.length) {
-      CACHE._histView = CACHE.invoices;
-      renderHistoryTable();
-    } else {
-      document.getElementById('hist-body').innerHTML = `<tr><td colspan="9" class="empty">Lỗi: ${e.message}</td></tr>`;
-    }
+    document.getElementById('hist-body').innerHTML = `<tr><td colspan="9" class="empty">Lỗi: ${e.message}</td></tr>`;
   }
 }
 
-function renderHistoryTable() {
-  const data = CACHE._histView !== undefined ? CACHE._histView : CACHE.invoices;
+let _histViewDate = todayStr(); // ngày đang xem trong tab Hôm nay
+
+function renderHistoryTable(data) {
+  if (data === undefined) data = (_histViewDate === todayStr()) ? CACHE.invoices : (invoicesByDate[_histViewDate] || []);
   const body = document.getElementById('hist-body');
   if (!data.length) {
     body.innerHTML = '<tr><td colspan="9" class="empty">Không có giao dịch</td></tr>';
@@ -1107,7 +1114,8 @@ function renderHistoryTable() {
 }
 
 function reInvoice(i) {
-  const t = (CACHE._histView !== undefined ? CACHE._histView : CACHE.invoices)[i];
+  const src = (_histViewDate === todayStr()) ? CACHE.invoices : (invoicesByDate[_histViewDate] || []);
+  const t = src[i];
   showInvoice({...t, invoiceNo: t.invoiceNo, timeIn: t.timeIn, timeOut: t.timeOut,
     customerName: t.customerName, customerPhone: t.customerPhone, staffName: t.staffName,
     subtotal: t.subtotal, discount: t.discount, vat: t.vat, total: t.total, payment: t.payment,
@@ -1115,9 +1123,10 @@ function reInvoice(i) {
 }
 
 function exportCSV() {
-  if (!CACHE.invoices.length) { toast('Không có dữ liệu để xuất','error'); return; }
+  const exportData = (_histViewDate === todayStr()) ? CACHE.invoices : (invoicesByDate[_histViewDate] || []);
+  if (!exportData.length) { toast('Không có dữ liệu để xuất','error'); return; }
   const rows = [['STT','Ngày','Giờ vào','Giờ ra','Khách','SĐT','Dịch vụ','Nhân viên','Tổng','Thanh toán']];
-  CACHE.invoices.forEach((t,i)=>rows.push([i+1,t.date,t.timeIn,t.timeOut,t.customerName,t.customerPhone||'',(t.items||[]).map(x=>x.name).join('|'),t.staffName,t.total,t.payment]));
+  exportData.forEach((t,i)=>rows.push([i+1,t.date,t.timeIn,t.timeOut,t.customerName,t.customerPhone||'',(t.items||[]).map(x=>x.name).join('|'),t.staffName,t.total,t.payment]));
   const csv = rows.map(r=>r.map(v=>`"${v}"`).join(',')).join('\n');
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv);
@@ -1353,7 +1362,6 @@ async function saveCust() {
 
 // ══ DASHBOARD ════════════════════════════════════════════════
 async function loadDashboard() {
-  // Xác định ngày cần hiển thị
   const dashDateInput = document.getElementById('dash-date')?.value;
   let dashDateStr = todayStr();
   if (dashDateInput) {
@@ -1361,17 +1369,18 @@ async function loadDashboard() {
     dashDateStr = `${day}/${m}/${y}`;
   }
 
-  // Lấy data theo ngày — KHÔNG ghi đè CACHE.invoices (hôm nay)
+  // Nguồn dữ liệu: hôm nay → CACHE.invoices; ngày khác → invoicesByDate
   let data;
   if (dashDateStr === todayStr()) {
-    data = CACHE.invoices || [];
+    data = CACHE.invoices;
   } else if (invoicesByDate[dashDateStr]) {
     data = invoicesByDate[dashDateStr];
   } else {
     try {
-      data = await api({ action: 'getInvoices', date: dashDateStr });
-      invoicesByDate[dashDateStr] = data;
+      const fetched = await api({ action: 'getInvoices', date: dashDateStr });
+      invoicesByDate[dashDateStr] = Array.isArray(fetched) ? fetched : [];
       saveInvoiceDateCache();
+      data = invoicesByDate[dashDateStr];
     } catch(e) { data = []; }
   }
 
