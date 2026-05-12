@@ -559,8 +559,15 @@ tr:hover td{background:#fdf6f9}
 const CFG_KEY = 'spa_config';
 let cfg = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
 
-// !! PASTE YOUR SCRIPT URL HERE (or use Settings page):
-// cfg.scriptUrl = "https://script.google.com/macros/s/YOUR_ID/exec";
+// URL cố định — không cần nhập lại
+if (!cfg.scriptUrl) {
+  cfg.scriptUrl = "https://script.google.com/macros/s/AKfycbw8JM9xFmAQ0g9wFD0vAhuxOwXSBEuCFkF-b-_NfdT6dLFHasb4P39q62fuy2OSF8A-pg/exec";
+  cfg.spaName   = "Phương Mai Beauty&Academy";
+  cfg.address   = "Lô 21, KTM Thanh Hà, Phường Phan Rang, Tỉnh Khánh Hòa";
+  cfg.spaPhone  = "0946.688.679";
+  cfg.vat       = "8";
+  localStorage.setItem('spa_config', JSON.stringify(cfg));
+}
 
 function getUrl() { return cfg.scriptUrl || ''; }
 const VAT_RATE = () => (parseFloat(cfg.vat) || 8) / 100;
