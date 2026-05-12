@@ -264,7 +264,9 @@ tr:hover td{background:#fdf6f9}
 
       <div class="card">
         <div class="card-title">💆 Dịch vụ</div>
-        <div id="svc-loading" class="empty" style="padding:1rem">Đang tải dịch vụ...</div>
+        <div id="svc-loading" class="empty" style="padding:1rem">if (!CACHE.services) {
+  return '<div>Chưa kết nối dữ liệu</div>';
+}</div>
         <div class="svc-grid" id="svc-grid" style="display:none"></div>
         <div id="prod-section" style="display:none">
           <div style="font-size:.72rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:.85rem 0 .45rem">Sản phẩm bán lẻ</div>
@@ -454,7 +456,7 @@ tr:hover td{background:#fdf6f9}
     <div class="card-title">Google Apps Script URL</div>
     <div class="fg">
       <label>Web App URL</label>
-      <input id="cfg-url" type="text" placeholder="https://script.google.com/macros/s/.../exec">
+      <input id="cfg-url" type="text" placeholder="https://script.google.com/macros/s/AKfycbw8JM9xFmAQ0g9wFD0vAhuxOwXSBEuCFkF-b-_NfdT6dLFHasb4P39q62fuy2OSF8A-pg/exec">
     </div>
     <div class="fg">
       <label>Tên Spa (hiển thị trên hoá đơn)</label>
@@ -1651,7 +1653,11 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
 });
 
 // ══ INIT ═════════════════════════════════════════════════════
-if (getUrl()) syncAll();
+if (getUrl()) {
+  syncAll();
+} else {
+  console.warn("Chưa có Script URL");
+}
 renderServiceGrid();
 renderOrder();
 </script>
