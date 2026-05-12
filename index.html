@@ -688,16 +688,21 @@ document.getElementById('dash-date').value = isoToday();
 
 // ══ NAV ══════════════════════════════════════════════════════
 function goPage(id, el) {
+  // 1. Chuyển đổi hiển thị trang
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-  document.getElementById('page-'+id).classList.add('active');
-  if(el) el.classList.add('active');
-  if(id==='history')   loadHistory();
-  if(id==='inventory') renderInventory();
-  if(id==='staff')     renderStaff();
-  if(id==='customers') renderCusts();
-  if(id==='dashboard') loadDashboard();
-  if(id==='settings')  loadConfigForm();
+  
+  const targetPage = document.getElementById('page-' + id);
+  if (targetPage) targetPage.classList.add('active');
+  if (el) el.classList.add('active');
+
+  // 2. Làm mới dữ liệu theo từng trang (Dùng đúng biến id)
+  if (id === 'history')   loadHistory();
+  if (id === 'inventory') renderInventory();
+  if (id === 'staff')     renderStaff();
+  if (id === 'customers') renderCusts();
+  if (id === 'dashboard') loadDashboard();
+  if (id === 'settings')  loadConfigForm();
 }
 
 // ══ SETUP BANNER ═════════════════════════════════════════════
@@ -1432,9 +1437,22 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
 });
 
 // ══ INIT ═════════════════════════════════════════════════════
-if (getUrl()) syncAll();
 renderServiceGrid();
 renderOrder();
+  
+window.addEventListener('DOMContentLoaded', () => {
+  // 1. Tự động điền ngày hôm nay
+  const today = new Date().toISOString().split('T')[0];
+  if (document.getElementById('hist-date')) document.getElementById('hist-date').value = today;
+  if (document.getElementById('dash-date')) document.getElementById('dash-date').value = today;
+
+  // 2. Tự động tải dữ liệu từ Sheets
+  if (typeof cfg !== 'undefined' && cfg.scriptUrl) {
+    syncAll(); 
+  }
+  
+  if (typeof updateClock === 'function') updateClock();
+});
 </script>
 </body>
 </html>
