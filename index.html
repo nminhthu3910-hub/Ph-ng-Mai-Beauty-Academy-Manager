@@ -663,6 +663,13 @@ const todayStr = () => {
   return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
 };
 const isoToday = () => new Date().toISOString().slice(0,10);
+// Chuyển input[type=date] value (YYYY-MM-DD) sang dd/MM/yyyy an toàn
+function isoToDmy(iso) {
+  if (!iso || !iso.includes('-')) return todayStr();
+  const [y,m,d] = iso.split('-');
+  if (!y || !m || !d) return todayStr();
+  return `${d}/${m}/${y}`;
+}
 
 function showLoading(msg='Đang xử lý...') {
   document.getElementById('loading').classList.remove('hidden');
@@ -706,12 +713,15 @@ function goPage(id, el) {
   if (targetPage) targetPage.classList.add('active');
   if (el) el.classList.add('active');
 
-  // 2. Cập nhật dữ liệu tương ứng với từng trang
-  if (id === 'history')   loadHistory();
+  // 2. Render trang — dùng hàm sync để tránh race condition khi chuyển tab nhanh
+  if (id === 'history') {
+    _histViewDate = todayStr(); // reset về hôm nay mỗi khi vào tab
+    renderHistoryTable(CACHE.invoices);
+  }
   if (id === 'inventory') renderInventory();
   if (id === 'staff')     renderStaff();
   if (id === 'customers') renderCusts();
-  if (id === 'dashboard') loadDashboard();
+  if (id === 'dashboard') renderDashboardFromCache();
   if (id === 'settings')  loadConfigForm();
 }
 
@@ -738,10 +748,48 @@ function renderAll() {
   updateStaffSelect();
   updateCustDatalist();
   renderInventory();
-  renderStaff();
+  renderStaff();           // đọc CACHE.invoices cho hoa hồng hôm nay
   renderCusts();
-  renderHistoryTable(CACHE.invoices); // render history tab với dữ liệu hôm nay (đã có trong CACHE)
-  loadDashboard();                    // dashboard cũng đọc từ CACHE.invoices, không gọi API thêm
+  renderHistoryTable(CACHE.invoices);  // tab Hôm nay — dùng CACHE.invoices trực tiếp
+  renderDashboardFromCache();          // dashboard đồng bộ, không gọi API
+}
+
+// Render dashboard từ CACHE.invoices hiện có (không async, không gọi API)
+function renderDashboardFromCache() {
+  const data = CACHE.invoices;
+  const lowStock = CACHE.inventory.filter(i => i.stock <= i.min && i.min > 0).length;
+
+  document.getElementById('d-rev').textContent  = fmt(data.reduce((s,t)=>s+(Number(t.total)||0),0));
+  document.getElementById('d-cnt').textContent  = data.length;
+  document.getElementById('d-comm').textContent = fmt(data.reduce((s,t)=>s+(Number(t.commission)||0),0));
+  document.getElementById('d-low').textContent  = lowStock;
+  document.getElementById('d-date').textContent = todayStr();
+
+  // Top dịch vụ
+  const svcMap = {};
+  data.forEach(inv => (inv.items||[]).forEach(it => {
+    svcMap[it.name] = (svcMap[it.name]||0) + (Number(it.qty)||1);
+  }));
+  const topSvcs = Object.entries(svcMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  document.getElementById('top-svcs').innerHTML = topSvcs.length
+    ? topSvcs.map(([name,qty]) => `
+        <div style="margin-bottom:.8rem">
+          <div style="display:flex;justify-content:space-between;font-size:.83rem"><span>${name}</span><strong>${qty}</strong></div>
+          <div class="bar-wrap"><div class="bar-fill" style="width:${Math.min(qty*15,100)}%"></div></div>
+        </div>`).join('')
+    : '<div class="empty">Chưa có dữ liệu</div>';
+
+  // Doanh thu nhân viên
+  const staffMap = {};
+  data.forEach(inv => { staffMap[inv.staffName] = (staffMap[inv.staffName]||0) + (Number(inv.total)||0); });
+  const maxRev = Math.max(...Object.values(staffMap), 1);
+  document.getElementById('staff-bars').innerHTML = Object.keys(staffMap).length
+    ? Object.entries(staffMap).map(([name,rev]) => `
+        <div style="margin-bottom:.9rem">
+          <div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:.25rem"><span>${name}</span><strong>${fmt(rev)}</strong></div>
+          <div class="bar-wrap"><div class="bar-fill" style="width:${(rev/maxRev)*100}%"></div></div>
+        </div>`).join('')
+    : '<div class="empty">Chưa có dữ liệu</div>';
 }
 
 // ══ SYNC ALL ═════════════════════════════════════════════════
@@ -750,33 +798,32 @@ async function syncAll() {
   setSyncing(true);
   toast('Đang đồng bộ...', 'info');
   try {
-    // Lấy ngày hôm nay dạng dd/MM/yyyy để gọi getInvoices
-    const todayDD = todayStr();
+    // Bước 1: tải master data + invoices hôm nay song song
     const [svcs, staff, customers, inventory, todayInvoices] = await Promise.all([
       api({ action: 'getServices' }),
       api({ action: 'getStaff' }),
       api({ action: 'getCustomers' }),
       api({ action: 'getInventory' }),
-      api({ action: 'getInvoices', date: todayDD }),
+      api({ action: 'getInvoices', date: todayStr() }),
     ]);
-    CACHE.services  = Array.isArray(svcs)       ? svcs       : [];
-    CACHE.staff     = Array.isArray(staff)       ? staff      : [];
-    CACHE.customers = Array.isArray(customers)   ? customers  : [];
-    CACHE.inventory = Array.isArray(inventory)   ? inventory  : [];
 
-    // Lưu master data
-    cSave('services');
-    cSave('staff');
-    cSave('customers');
-    cSave('inventory');
+    // Bước 2: cập nhật CACHE
+    CACHE.services  = Array.isArray(svcs)       ? svcs       : CACHE.services;
+    CACHE.staff     = Array.isArray(staff)       ? staff      : CACHE.staff;
+    CACHE.customers = Array.isArray(customers)   ? customers  : CACHE.customers;
+    CACHE.inventory = Array.isArray(inventory)   ? inventory  : CACHE.inventory;
+    cSave('services'); cSave('staff'); cSave('customers'); cSave('inventory');
 
-    // Lưu invoices hôm nay qua helper thống nhất
+    // Bước 3: lưu invoices hôm nay — đây là nguồn sự thật cho staff + dashboard
     saveInvoicesToday(Array.isArray(todayInvoices) ? todayInvoices : []);
 
+    // Bước 4: render tất cả sau khi data đã sẵn sàng
     renderAll();
     toast('Đồng bộ thành công!', 'ok');
   } catch (e) {
-    toast('Lỗi đồng bộ: ' + e.message, 'error');
+    // Ngay cả khi API lỗi, vẫn render với dữ liệu cache cũ
+    renderAll();
+    toast('Đồng bộ thất bại — dùng dữ liệu cache: ' + e.message, 'error');
   }
   setSyncing(false);
 }
@@ -994,13 +1041,10 @@ async function checkout() {
       cSave('customers');
     }
 
-    // Hiển thị hoá đơn và refresh UI
+    // Hiển thị hoá đơn TRƯỚC
     showInvoice({...payload.data, invoiceNo: res.invoiceNo}, staff);
-    renderHistoryTable();
-    renderStaff();
-    loadDashboard();
-    renderCusts();
-    
+    toast('Lưu thành công! Hoá đơn đã ghi vào Sheets ✓','ok');
+
     // Reset POS
     selected = {};
     document.getElementById('pos-cname').value = '';
@@ -1010,7 +1054,12 @@ async function checkout() {
     document.getElementById('pos-timein').value = new Date().toTimeString().slice(0,5);
     renderServiceGrid();
     renderOrder();
-    toast('Lưu thành công! Hoá đơn đã ghi vào Sheets ✓','ok');
+
+    // Refresh các tab liên quan — tất cả sync, không async, không đóng modal
+    renderHistoryTable(CACHE.invoices);
+    renderStaff();
+    renderCusts();
+    renderDashboardFromCache();
   } catch(e) {
     hideLoading();
     toast('Lỗi lưu: ' + e.message, 'error');
@@ -1049,9 +1098,7 @@ function showInvoice(d, staff) {
 
 // ══ HISTORY ══════════════════════════════════════════════════
 async function loadHistory() {
-  const dateInput = document.getElementById('hist-date').value;
-  const [y,m,day] = dateInput.split('-');
-  const dateStr = `${day}/${m}/${y}`;
+  const dateStr = isoToDmy(document.getElementById('hist-date').value);
   const isToday = (dateStr === todayStr());
 
   // Nếu là hôm nay: dùng CACHE.invoices (nguồn sự thật)
@@ -1362,18 +1409,17 @@ async function saveCust() {
 
 // ══ DASHBOARD ════════════════════════════════════════════════
 async function loadDashboard() {
-  const dashDateInput = document.getElementById('dash-date')?.value;
-  let dashDateStr = todayStr();
-  if (dashDateInput) {
-    const [y,m,day] = dashDateInput.split('-');
-    dashDateStr = `${day}/${m}/${y}`;
+  const dashDateStr = isoToDmy(document.getElementById('dash-date')?.value || '');
+
+  // Hôm nay: render ngay từ CACHE, không gọi API
+  if (dashDateStr === todayStr()) {
+    renderDashboardFromCache();
+    return;
   }
 
-  // Nguồn dữ liệu: hôm nay → CACHE.invoices; ngày khác → invoicesByDate
+  // Ngày khác: lấy từ cache hoặc gọi API
   let data;
-  if (dashDateStr === todayStr()) {
-    data = CACHE.invoices;
-  } else if (invoicesByDate[dashDateStr]) {
+  if (invoicesByDate[dashDateStr]) {
     data = invoicesByDate[dashDateStr];
   } else {
     try {
@@ -1384,71 +1430,36 @@ async function loadDashboard() {
     } catch(e) { data = []; }
   }
 
-  const totalRevenue = data.reduce((s, t) => s + (Number(t.total) || 0), 0);
-  const totalCustomers = data.length;
-  const totalCommission = data.reduce((s, t) => s + (Number(t.commission) || 0), 0);
-  const lowStock = CACHE.inventory.filter(i => i.stock <= i.min).length;
-
-  document.getElementById('d-rev').textContent = fmt(totalRevenue);
-  document.getElementById('d-cnt').textContent = totalCustomers;
-  document.getElementById('d-comm').textContent = fmt(totalCommission);
-  document.getElementById('d-low').textContent = lowStock;
+  // Render cho ngày khác (không dùng renderDashboardFromCache vì đó chỉ cho hôm nay)
+  const lowStock = CACHE.inventory.filter(i => i.stock <= i.min && i.min > 0).length;
+  document.getElementById('d-rev').textContent  = fmt(data.reduce((s,t)=>s+(Number(t.total)||0),0));
+  document.getElementById('d-cnt').textContent  = data.length;
+  document.getElementById('d-comm').textContent = fmt(data.reduce((s,t)=>s+(Number(t.commission)||0),0));
+  document.getElementById('d-low').textContent  = lowStock;
   document.getElementById('d-date').textContent = dashDateStr;
 
-  // =========================
-  // TOP SERVICES
-  // =========================
-
   const svcMap = {};
-
-  data.forEach(inv => {
-    (inv.items || []).forEach(it => {
-      svcMap[it.name] = (svcMap[it.name] || 0) + it.qty;
-    });
-  });
-
-  const topSvcs = Object.entries(svcMap)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5);
-
+  data.forEach(inv => (inv.items||[]).forEach(it => {
+    svcMap[it.name] = (svcMap[it.name]||0) + (Number(it.qty)||1);
+  }));
+  const topSvcs = Object.entries(svcMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
   document.getElementById('top-svcs').innerHTML = topSvcs.length
-    ? topSvcs.map(([name, qty]) => `
+    ? topSvcs.map(([name,qty]) => `
         <div style="margin-bottom:.8rem">
-          <div style="display:flex;justify-content:space-between;font-size:.83rem">
-            <span>${name}</span>
-            <strong>${qty}</strong>
-          </div>
-          <div class="bar-wrap">
-            <div class="bar-fill" style="width:${Math.min(qty * 15, 100)}%"></div>
-          </div>
-        </div>
-      `).join('')
+          <div style="display:flex;justify-content:space-between;font-size:.83rem"><span>${name}</span><strong>${qty}</strong></div>
+          <div class="bar-wrap"><div class="bar-fill" style="width:${Math.min(qty*15,100)}%"></div></div>
+        </div>`).join('')
     : '<div class="empty">Chưa có dữ liệu</div>';
 
-  // =========================
-  // STAFF REVENUE
-  // =========================
-
   const staffMap = {};
-
-  data.forEach(inv => {
-    staffMap[inv.staffName] = (staffMap[inv.staffName] || 0) + inv.total;
-  });
-
-  const maxRevenue = Math.max(...Object.values(staffMap), 1);
-
+  data.forEach(inv => { staffMap[inv.staffName] = (staffMap[inv.staffName]||0) + (Number(inv.total)||0); });
+  const maxRev = Math.max(...Object.values(staffMap), 1);
   document.getElementById('staff-bars').innerHTML = Object.keys(staffMap).length
-    ? Object.entries(staffMap).map(([name, rev]) => `
+    ? Object.entries(staffMap).map(([name,rev]) => `
         <div style="margin-bottom:.9rem">
-          <div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:.25rem">
-            <span>${name}</span>
-            <strong>${fmt(rev)}</strong>
-          </div>
-          <div class="bar-wrap">
-            <div class="bar-fill" style="width:${(rev / maxRevenue) * 100}%"></div>
-          </div>
-        </div>
-      `).join('')
+          <div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:.25rem"><span>${name}</span><strong>${fmt(rev)}</strong></div>
+          <div class="bar-wrap"><div class="bar-fill" style="width:${(rev/maxRev)*100}%"></div></div>
+        </div>`).join('')
     : '<div class="empty">Chưa có dữ liệu</div>';
 }
 
