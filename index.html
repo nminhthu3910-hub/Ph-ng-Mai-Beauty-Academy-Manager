@@ -1321,8 +1321,7 @@ function onCustInput() {
   const name = document.getElementById('pos-cname').value;
   const cust = C.customers.find(x => x.name === name);
   if (cust) {
-    document.getElementById('pos-phone').value = cust.phone || '';
-    // Ẩn gợi ý SĐT vì đã chọn khách rồi
+    document.getElementById('pos-phone').value = String(cust.phone || '');
     document.getElementById('phone-suggest').style.display = 'none';
   }
 }
@@ -1336,8 +1335,10 @@ function onPhoneInput() {
 
   // Tìm khách có SĐT khớp (so sánh phần số, bỏ khoảng trắng/dấu)
   const cust = C.customers.find(x => {
-    const p = (x.phone||'').replace(/\s|-/g,'');
-    return p === phone || p.endsWith(phone) || phone.endsWith(p);
+    const p = String(x.phone||'').replace(/[\s\-().+]/g,'');
+    const q = phone.replace(/[\s\-().+]/g,'');
+    if (!p || !q) return false;
+    return p === q || p.endsWith(q) || q.endsWith(p);
   });
 
   if (cust) {
