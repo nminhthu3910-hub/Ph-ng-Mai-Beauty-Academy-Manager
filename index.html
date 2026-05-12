@@ -263,7 +263,12 @@ tr:hover td{background:#fdf6f9}
           </div>
           <div class="fg">
             <label>Số điện thoại</label>
-            <input id="pos-phone" type="tel" placeholder="09x xxxx xxx">
+            <input id="pos-phone" type="tel" placeholder="09x xxxx xxx" oninput="onPhoneInput()">
+          <div id="phone-suggest" style="display:none;margin-top:.3rem;padding:.5rem .75rem;background:var(--rose-pale);border:1px solid var(--rose-light);border-radius:8px;font-size:.82rem;cursor:pointer" onclick="applyPhoneSuggest()">
+            <span style="color:var(--muted)">Khách cũ:</span>
+            <strong id="phone-suggest-name" style="color:var(--rose-dark);margin-left:.3rem"></strong>
+            <span id="phone-suggest-info" style="color:var(--muted);margin-left:.4rem"></span>
+          </div>
           </div>
         </div>
         <div class="fg" style="margin-bottom:0">
@@ -1313,9 +1318,48 @@ function updateCustDatalist() {
     C.customers.map(c=>`<option value="${c.name}" data-phone="${c.phone}">`).join('');
 }
 function onCustInput() {
-  const name=document.getElementById('pos-cname').value;
-  const c=C.customers.find(x=>x.name===name);
-  if (c) document.getElementById('pos-phone').value=c.phone;
+  const name = document.getElementById('pos-cname').value;
+  const cust = C.customers.find(x => x.name === name);
+  if (cust) {
+    document.getElementById('pos-phone').value = cust.phone || '';
+    // Ẩn gợi ý SĐT vì đã chọn khách rồi
+    document.getElementById('phone-suggest').style.display = 'none';
+  }
+}
+
+// Nhập SĐT → tìm ngược tên khách cũ
+let _phoneSuggestCust = null;
+function onPhoneInput() {
+  const phone = document.getElementById('pos-phone').value.trim().replace(/\s/g,'');
+  const box   = document.getElementById('phone-suggest');
+  if (phone.length < 6) { box.style.display='none'; _phoneSuggestCust=null; return; }
+
+  // Tìm khách có SĐT khớp (so sánh phần số, bỏ khoảng trắng/dấu)
+  const cust = C.customers.find(x => {
+    const p = (x.phone||'').replace(/\s|-/g,'');
+    return p === phone || p.endsWith(phone) || phone.endsWith(p);
+  });
+
+  if (cust) {
+    _phoneSuggestCust = cust;
+    document.getElementById('phone-suggest-name').textContent = cust.name;
+    const tier    = cust.totalSpent>5e6?'🥇 Vàng':cust.totalSpent>2e6?'🥈 Bạc':'🥉 Đồng';
+    const visits  = cust.visits ? `${cust.visits} lần đến` : '';
+    const spent   = cust.totalSpent ? `· ${fmt(cust.totalSpent)}` : '';
+    document.getElementById('phone-suggest-info').textContent = `${tier} ${visits} ${spent}`;
+    box.style.display = '';
+  } else {
+    box.style.display = 'none';
+    _phoneSuggestCust = null;
+  }
+}
+
+// Bấm vào gợi ý → điền tên vào ô tên khách
+function applyPhoneSuggest() {
+  if (!_phoneSuggestCust) return;
+  document.getElementById('pos-cname').value = _phoneSuggestCust.name;
+  document.getElementById('phone-suggest').style.display = 'none';
+  _phoneSuggestCust = null;
 }
 
 // ══ CHECKOUT ════════════════════════════════════════════════
@@ -1373,19 +1417,41 @@ async function checkout() {
     const updatedInvoices = [newInv, ...C.invoices];
     mcSet(K.invToday(), updatedInvoices);
 
-    // Cập nhật customers cache
+    // Cập nhật customers cache + lưu lên Sheets nếu khách mới
     if (cust) {
       cust.totalSpent = (cust.totalSpent||0)+total;
       cust.visits     = (cust.visits||0)+1;
       cust.lastVisit  = todayStr();
+      mcSet(K.customers, C.customers);
     } else {
-      C.customers.push({
-        id:'CUS_'+Date.now(), name:cname,
-        phone:document.getElementById('pos-phone').value,
-        visits:1, totalSpent:total, lastVisit:todayStr(), tier:'Đồng', skin:'', allergy:'',
-      });
+      // Khách mới — lưu lên Sheets ngay, không chờ
+      const newCust = {
+        name:    cname,
+        phone:   document.getElementById('pos-phone').value,
+        dob:     '',
+        skin:    '',
+        allergy: 'Không',
+      };
+      apiPost({ action:'addCustomer', data: newCust })
+        .then(res => {
+          // Thêm vào cache với ID thật từ Sheets
+          const saved = {
+            id: res.id, ...newCust,
+            totalSpent: total, visits: 1, lastVisit: todayStr(), tier: 'Đồng',
+          };
+          mcSet(K.customers, [...C.customers, saved]);
+          updateCustDatalist(); // cập nhật autocomplete
+        })
+        .catch(() => {
+          // Nếu lỗi API thì vẫn lưu local tạm
+          mcSet(K.customers, [...C.customers, {
+            id: 'CUS_'+Date.now(), name: cname,
+            phone: document.getElementById('pos-phone').value,
+            totalSpent: total, visits: 1, lastVisit: todayStr(), tier: 'Đồng', skin:'', allergy:'',
+          }]);
+          updateCustDatalist();
+        });
     }
-    mcSet(K.customers, C.customers);
 
     // Hiện hoá đơn
     showInvoice({...payload.data, invoiceNo:res.invoiceNo}, staff);
