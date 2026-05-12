@@ -576,25 +576,21 @@ const SPA_ADDR = () => (cfg.address || '') + (cfg.spaPhone ? ' · ☎ ' + cfg.sp
 
 // ══ CACHE (localStorage fallback) ════════════════════════════
 const CACHE = {
-
-  invoices: JSON.parse(localStorage.getItem('pm_invoices') || '[]'),
-
-  customers: JSON.parse(localStorage.getItem('pm_customers') || '[]'),
-
-  inventory: JSON.parse(localStorage.getItem('pm_inventory') || '[]'),
-
-  staff: JSON.parse(localStorage.getItem('pm_staff') || '[]')
-
+  invoices:  JSON.parse(localStorage.getItem('spa_c_invoices')  || '[]'),
+  customers: JSON.parse(localStorage.getItem('spa_c_customers') || '[]'),
+  inventory: JSON.parse(localStorage.getItem('spa_c_inventory') || '[]'),
+  staff:     JSON.parse(localStorage.getItem('spa_c_staff')     || '[]'),
+  services:  JSON.parse(localStorage.getItem('spa_c_services')  || '[]'),
 };
 const CKEY = {
   services:  'spa_c_services',
   staff:     'spa_c_staff',
   customers: 'spa_c_customers',
   inventory: 'spa_c_inventory',
+  invoices:  'spa_c_invoices',
 };
 function cSave(key) { localStorage.setItem(CKEY[key], JSON.stringify(CACHE[key])); }
 function cLoad(key) { const d = localStorage.getItem(CKEY[key]); if(d) CACHE[key] = JSON.parse(d); }
-['services','staff','customers','inventory'].forEach(cLoad);
 
 // ══ API ═══════════════════════════════════════════════════════
 async function api(params) {
@@ -721,27 +717,48 @@ function saveScriptUrl() {
   syncAll();
 }
 
+// ══ RENDER ALL ═══════════════════════════════════════════════
+function renderAll() {
+  renderServiceGrid();
+  renderOrder();
+  updateStaffSelect();
+  updateCustDatalist();
+  renderInventory();
+  renderStaff();
+  renderCusts();
+  loadDashboard();
+}
+
 // ══ SYNC ALL ═════════════════════════════════════════════════
 async function syncAll() {
-  if(!cfg.scriptUrl) return;
-  toast('Đang đồng bộ...','info');
+  if (!cfg.scriptUrl) return;
+  setSyncing(true);
+  toast('Đang đồng bộ...', 'info');
   try {
-    const res = await api({ action:'getAll' });
-    if(res) {
-      CACHE.invoices = res.invoices || [];
-      CACHE.inventory = res.inventory || [];
-      CACHE.staff = res.staff || [];
-      CACHE.customers = res.customers || [];
+    // Gọi từng action riêng (backend không có getAll)
+    const [svcs, staff, customers, inventory] = await Promise.all([
+      api({ action: 'getServices' }),
+      api({ action: 'getStaff' }),
+      api({ action: 'getCustomers' }),
+      api({ action: 'getInventory' }),
+    ]);
+    CACHE.services  = Array.isArray(svcs)       ? svcs       : [];
+    CACHE.staff     = Array.isArray(staff)       ? staff      : [];
+    CACHE.customers = Array.isArray(customers)   ? customers  : [];
+    CACHE.inventory = Array.isArray(inventory)   ? inventory  : [];
 
-      // DÒNG QUAN TRỌNG NHẤT: Lưu vào máy để reload không bị mất
-      localStorage.setItem('pm_cache', JSON.stringify(CACHE));
-      
-      renderAll();
-      toast('Đồng bộ thành công!','ok');
-    }
-  } catch(e) {
-    toast('Lỗi đồng bộ','err');
+    // Lưu đúng key riêng lẻ — đồng bộ với cách CACHE đọc lúc khởi động
+    localStorage.setItem('spa_c_services',  JSON.stringify(CACHE.services));
+    localStorage.setItem('spa_c_staff',     JSON.stringify(CACHE.staff));
+    localStorage.setItem('spa_c_customers', JSON.stringify(CACHE.customers));
+    localStorage.setItem('spa_c_inventory', JSON.stringify(CACHE.inventory));
+
+    renderAll();
+    toast('Đồng bộ thành công!', 'ok');
+  } catch (e) {
+    toast('Lỗi đồng bộ: ' + e.message, 'error');
   }
+  setSyncing(false);
 }
 
 // ══ POS: SERVICE GRID ════════════════════════════════════════
@@ -915,81 +932,55 @@ async function checkout() {
   try {
     const res = await apiPost(payload);
     hideLoading();
-    // Update local inventory cache
+
+    // Cập nhật tồn kho local
     items.filter(it => it.type === 'bán lẻ').forEach(it => {
       const inv = CACHE.inventory.find(i => i.id == it.id);
       if (inv) inv.stock = Math.max(0, inv.stock - it.qty);
     });
     cSave('inventory');
-    // Update local customer cache
+
+    // Thêm invoice mới vào cache
+    const newInvoice = {
+      ...payload.data,
+      invoiceNo: res.invoiceNo,
+      date: todayStr(),
+      total: Number(payload.data.total || 0),
+      commission: Number(payload.data.commission || 0),
+      staffName: staff?.name || '',
+      createdAt: Date.now(),
+    };
+    CACHE.invoices.unshift(newInvoice);
+    cSave('invoices');
+
+    // Cập nhật khách hàng local
     if (custObj) {
-      custObj.totalSpent = (custObj.totalSpent||0) + total;
-      custObj.visits = (custObj.visits||0) + 1;
-      custObj.lastVisit = todayStr();
+      custObj.totalSpent = (custObj.totalSpent || 0) + total;
+      custObj.visits     = (custObj.visits     || 0) + 1;
+      custObj.lastVisit  = todayStr();
+      cSave('customers');
+    } else {
+      const newCustomer = {
+        id: 'CUS_' + Date.now(),
+        name: cname,
+        phone: document.getElementById('pos-phone').value,
+        visits: 1,
+        totalSpent: total,
+        lastVisit: todayStr(),
+        tier: 'Đồng',
+        skin: '',
+        allergy: '',
+      };
+      CACHE.customers.push(newCustomer);
       cSave('customers');
     }
-    showInvoice({...payload.data, invoiceNo: res.invoiceNo}, staff)
-      // =============================
-// UPDATE LOCAL CACHE REALTIME
-// =============================
 
-const newInvoice = {
-  ...payload.data,
-
-  invoiceNo: res.invoiceNo,
-
-  date: todayStr(),
-
-  total: Number(payload.data.total || 0),
-
-  commission: Number(payload.data.commission || 0),
-
-  staffName: staff?.name || '',
-
-  createdAt: Date.now()
-};
-
-// lưu invoice vào cache
-CACHE.invoices.unshift(newInvoice);
-
-CACHE.invoices = [...CACHE.invoices];
-
-localStorage.setItem(
-  'pm_invoices',
-  JSON.stringify(CACHE.invoices)
-);
-
-// cập nhật lượt khách
-if (custObj) {
-  custObj.visits = (custObj.visits || 0) + 1;
-  custObj.totalSpent = (custObj.totalSpent || 0) + total;
-  custObj.lastVisit = todayStr();
-} else {
-
-  const newCustomer = {
-    id: 'CUS_' + Date.now(),
-    name: cname,
-    phone: document.getElementById('pos-phone').value,
-    visits: 1,
-    totalSpent: total,
-    lastVisit: todayStr(),
-    rank: 'Mới',
-    skinType: '',
-    allergy: ''
-  };
-
-  CACHE.customers.push(newCustomer);
-}
-
-function cSave(k){
-  localStorage.setItem('pm_'+k, JSON.stringify(CACHE[k]));
-}
-
-// refresh UI realtime
-renderHistoryTable();
-renderStaff();
-loadDashboard();
-renderCusts();;
+    // Hiển thị hoá đơn và refresh UI
+    showInvoice({...payload.data, invoiceNo: res.invoiceNo}, staff);
+    renderHistoryTable();
+    renderStaff();
+    loadDashboard();
+    renderCusts();
     
     // Reset POS
     selected = {};
