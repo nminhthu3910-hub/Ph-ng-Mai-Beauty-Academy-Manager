@@ -605,14 +605,40 @@ async function api(params) {
 
 async function apiPost(body) {
   const url = getUrl();
-  if (!url) throw new Error('Chưa cài URL Apps Script.');
+
+  if (!url) {
+    throw new Error('Chưa cài URL Apps Script.');
+  }
+
+  const formData = new URLSearchParams();
+
+  formData.append('payload', JSON.stringify(body));
+
   const res = await fetch(url, {
     method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(body),
+    mode: 'cors',
+    body: formData
   });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+
+  const text = await res.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    console.error('Response không phải JSON:', text);
+    throw new Error('Apps Script trả về dữ liệu không hợp lệ');
+  }
+
+  if (data.error) {
+    throw new Error(data.error);
+  }
+
   return data;
 }
 
