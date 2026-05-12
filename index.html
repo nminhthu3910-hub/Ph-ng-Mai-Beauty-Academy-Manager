@@ -745,27 +745,25 @@ function saveScriptUrl() {
 
 // ══ SYNC ALL ═════════════════════════════════════════════════
 async function syncAll() {
-  if (!getUrl()) { toast('Chưa cài URL — vào ⚙ Cài đặt','error'); return; }
-  setSyncing(true);
-  try {
-    const [svcs, staff, custs, inv] = await Promise.all([
-      api({action:'getServices'}),
-      api({action:'getStaff'}),
-      api({action:'getCustomers'}),
-      api({action:'getInventory'}),
-    ]);
-    CACHE.services  = svcs;  cSave('services');
-    CACHE.staff     = staff; cSave('staff');
-    CACHE.customers = custs; cSave('customers');
-    CACHE.inventory = inv;   cSave('inventory');
-    renderServiceGrid();
-    updateStaffSelect();
-    updateCustDatalist();
-    toast('Đồng bộ thành công ✓','ok');
-  } catch(e) {
-    toast('Lỗi: ' + e.message, 'error');
+  // Kiểm tra xem đã có URL chưa
+  if (!cfg.scriptUrl || cfg.scriptUrl.trim() === "") {
+    toast('Lỗi: Vui lòng dán URL Script trong phần Cài đặt!', 'error');
+    openModal('modal-config'); // Tự động mở bảng cài đặt để người dùng dán vào
+    return;
   }
-  setSyncing(false);
+
+  showLoading(true);
+  try {
+    await Promise.all([getServices(), getStaff(), getCustomers(), getInventory()]);
+    toast('Đã đồng bộ dữ liệu mới nhất ✓', 'ok');
+    renderServiceList();
+    renderInventory();
+  } catch (err) {
+    console.error(err);
+    toast('Lỗi kết nối: ' + err.message, 'error');
+  } finally {
+    showLoading(false);
+  }
 }
 
 // ══ POS: SERVICE GRID ════════════════════════════════════════
