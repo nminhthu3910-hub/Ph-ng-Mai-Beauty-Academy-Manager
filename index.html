@@ -183,6 +183,7 @@ tr:hover td{background:#fdf6f9}
 .prod-card{border:2px solid var(--border);border-radius:var(--radius);padding:.7rem;cursor:pointer;transition:all .18s;background:var(--white);position:relative}
 .prod-card:hover{border-color:var(--rose-light);background:var(--rose-pale)}
 .prod-card.out-of-stock{opacity:.45;cursor:not-allowed;background:#f5f5f5}
+.prod-card.selected{border-color:var(--rose);background:var(--rose-pale);box-shadow:0 0 0 2px var(--rose-light)}
 .prod-card .prod-name{font-weight:500;font-size:.84rem;margin-bottom:.25rem;line-height:1.3}
 .prod-card .prod-price{color:var(--rose-dark);font-weight:600;font-size:.9rem}
 .prod-card .prod-stock{font-size:.72rem;color:var(--muted);margin-top:.18rem}
@@ -1201,8 +1202,9 @@ function renderServiceGrid() {
       const min   = inv ? (inv.min||3) : 3;
       const out   = stock !== null && stock <= 0;
       const low   = !out && stock !== null && stock <= min;
-      const qty   = selected[p.id] || 0;
-      return `<div class="prod-card ${out?'out-of-stock':''}" id="pc-${p.id}">
+      const sel   = !!selected[p.id];
+      return `<div class="prod-card ${out?'out-of-stock':''} ${sel?'selected':''}"
+               onclick="toggleSvc('${p.id}')" id="pc-${p.id}">
         <div class="prod-name">${p.name}</div>
         <div class="prod-price">${fmt(p.price)}</div>
         <div class="prod-stock ${low?'low':''}">${
@@ -1211,11 +1213,6 @@ function renderServiceGrid() {
           low ? `⚠️ Còn ${stock} ${p.unit||''}` :
           `Tồn: ${stock} ${p.unit||''}`
         }</div>
-        ${out ? '' : `<div class="prod-qty-row">
-          <button onclick="changeProdQty('${p.id}',-1)" ${qty<=0?'style="opacity:.35"':''}>−</button>
-          <span class="qty-val" id="pqv-${p.id}">${qty>0?qty:'Thêm'}</span>
-          <button onclick="changeProdQty('${p.id}',1)">+</button>
-        </div>`}
       </div>`;
     }).join('');
   } else pSec.style.display='none';
@@ -1250,11 +1247,13 @@ function changeProdQty(id, delta) {
 
 function toggleSvc(id) {
   const svc = C.services.find(s=>s.id==id);
-  // Bán lẻ dùng changeProdQty, không dùng toggle
-  if (svc?.type==='bán lẻ') { changeProdQty(id, 1); return; }
+  const inv = C.inventory.find(i=>i.id==id);
+  if (svc?.type==='bán lẻ' && inv && inv.stock<=0) { toast('Sản phẩm đã hết hàng','error'); return; }
   selected[id] = selected[id] ? 0 : 1;
   if (!selected[id]) delete selected[id];
+  // Cập nhật class selected cho cả svc-card và prod-card
   document.getElementById('sc-'+id)?.classList.toggle('selected', !!selected[id]);
+  document.getElementById('pc-'+id)?.classList.toggle('selected', !!selected[id]);
   renderOrder();
 }
 function changeQty(id, delta) { selected[id]=Math.max(1,(selected[id]||1)+delta); renderOrder(); }
@@ -1278,11 +1277,9 @@ function renderOrder() {
         <div style="font-size:.73rem;color:var(--muted)">${fmt(it.price)} × ${it.qty}</div>
       </div>
       <div style="display:flex;align-items:center;gap:.3rem">
-        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem"
-          onclick="${it.type==='bán lẻ'?`changeProdQty('${it.id}',-1)`:`changeQty('${it.id}',-1)`}">−</button>
+        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem" onclick="changeQty('${it.id}',-1)">−</button>
         <span style="min-width:18px;text-align:center;font-weight:500">${it.qty}</span>
-        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem"
-          onclick="${it.type==='bán lẻ'?`changeProdQty('${it.id}',1)`:`changeQty('${it.id}',1)`}">+</button>
+        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem" onclick="changeQty('${it.id}',1)">+</button>
         <span style="font-weight:600;color:var(--rose-dark);min-width:75px;text-align:right">${fmt(it.price*it.qty)}</span>
       </div>
     </div>`).join('');
@@ -1402,9 +1399,7 @@ async function checkout() {
     document.getElementById('pos-disc').value='0';
     document.getElementById('pos-timein').value=new Date().toTimeString().slice(0,5);
     renderServiceGrid(); renderOrder();
-    // Cập nhật tồn kho hiển thị trên prod cards
-    document.querySelectorAll('[id^="pqv-"]').forEach(el=>{ el.textContent='Thêm'; });
-    document.querySelectorAll('[id^="pc-"]').forEach(el=>{ el.style.outline=''; });
+
 
     // Refresh các tab khác từ cache đã cập nhật
     renderHistoryTable(C.invoices);
