@@ -605,14 +605,40 @@ async function api(params) {
 
 async function apiPost(body) {
   const url = getUrl();
-  if (!url) throw new Error('Chưa cài URL Apps Script.');
+
+  if (!url) {
+    throw new Error('Chưa cài URL Apps Script.');
+  }
+
+  const formData = new URLSearchParams();
+
+  formData.append('payload', JSON.stringify(body));
+
   const res = await fetch(url, {
     method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(body),
+    mode: 'cors',
+    body: formData
   });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+
+  const text = await res.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    console.error('Response không phải JSON:', text);
+    throw new Error('Apps Script trả về dữ liệu không hợp lệ');
+  }
+
+  if (data.error) {
+    throw new Error(data.error);
+  }
+
   return data;
 }
 
@@ -895,7 +921,50 @@ async function checkout() {
       custObj.lastVisit = todayStr();
       cSave('customers');
     }
-    showInvoice({...payload.data, invoiceNo: res.invoiceNo}, staff);
+    showInvoice({...payload.data, invoiceNo: res.invoiceNo}, staff)
+      // =============================
+// UPDATE LOCAL CACHE REALTIME
+// =============================
+
+const newInvoice = {
+  ...payload.data,
+  invoiceNo: res.invoiceNo,
+  date: todayStr()
+};
+
+// lưu invoice vào cache
+CACHE.invoices.unshift(newInvoice);
+
+// cập nhật lượt khách
+if (custObj) {
+  custObj.visits = (custObj.visits || 0) + 1;
+  custObj.totalSpent = (custObj.totalSpent || 0) + total;
+  custObj.lastVisit = todayStr();
+} else {
+
+  const newCustomer = {
+    id: 'CUS_' + Date.now(),
+    name: cname,
+    phone: document.getElementById('pos-phone').value,
+    visits: 1,
+    totalSpent: total,
+    lastVisit: todayStr(),
+    rank: 'Mới',
+    skinType: '',
+    allergy: ''
+  };
+
+  CACHE.customers.push(newCustomer);
+}
+
+cSave('customers');
+
+// refresh UI realtime
+renderHistoryTable();
+renderStaff();
+loadDashboard();
+renderCusts();;
+    
     // Reset POS
     selected = {};
     document.getElementById('pos-cname').value = '';
@@ -1237,38 +1306,79 @@ async function saveCust() {
 
 // ══ DASHBOARD ════════════════════════════════════════════════
 async function loadDashboard() {
-  const dateInput = document.getElementById('dash-date').value;
-  const [y,m,day] = dateInput.split('-');
-  const dateStr = `${day}/${m}/${y}`;
-  document.getElementById('d-date').textContent = dateStr;
-  try {
-    const d = await api({action:'getDashboard', date: dateStr});
-    document.getElementById('d-rev').textContent  = fmt(d.totalRevenue);
-    document.getElementById('d-cnt').textContent  = d.customerCount;
-    document.getElementById('d-comm').textContent = fmt(d.totalCommission);
-    document.getElementById('d-low').textContent  = d.lowStockCount;
 
-    const maxSvc = d.topServices?.[0]?.rev || 1;
-    document.getElementById('top-svcs').innerHTML = (d.topServices||[]).length ? d.topServices.map(s => `
-      <div style="margin-bottom:.65rem">
-        <div style="display:flex;justify-content:space-between;font-size:.83rem;margin-bottom:.28rem">
-          <span>${s.name}</span><span style="font-weight:600;color:var(--rose-dark)">${fmt(s.rev)}</span>
-        </div>
-        <div class="bar-wrap"><div class="bar-fill" style="width:${Math.round(s.rev/maxSvc*100)}%"></div></div>
-      </div>`).join('') : '<div class="empty">Chưa có dữ liệu</div>';
+  const data = CACHE.invoices || [];
 
-    const staff = CACHE.staff;
-    const maxRev = Math.max(...Object.values(d.revenueByStaff||{}), 1);
-    document.getElementById('staff-bars').innerHTML = staff.length ? staff.map(s => `
-      <div style="margin-bottom:.65rem" class="bar-teal">
-        <div style="display:flex;justify-content:space-between;font-size:.83rem;margin-bottom:.28rem">
-          <span>${s.name}</span><span style="font-weight:600;color:var(--teal)">${fmt(d.revenueByStaff?.[s.name]||0)}</span>
+  const totalRevenue = data.reduce((s, t) => s + (Number(t.total) || 0), 0);
+
+  const totalCustomers = data.length;
+
+  const totalCommission = data.reduce((s, t) => s + (Number(t.commission) || 0), 0);
+
+  const lowStock = CACHE.inventory.filter(i => i.stock <= i.min).length;
+
+  document.getElementById('d-rev').textContent = fmt(totalRevenue);
+  document.getElementById('d-cnt').textContent = totalCustomers;
+  document.getElementById('d-comm').textContent = fmt(totalCommission);
+  document.getElementById('d-low').textContent = lowStock;
+
+  document.getElementById('d-date').textContent = todayStr();
+
+  // =========================
+  // TOP SERVICES
+  // =========================
+
+  const svcMap = {};
+
+  data.forEach(inv => {
+    (inv.items || []).forEach(it => {
+      svcMap[it.name] = (svcMap[it.name] || 0) + it.qty;
+    });
+  });
+
+  const topSvcs = Object.entries(svcMap)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  document.getElementById('top-svcs').innerHTML = topSvcs.length
+    ? topSvcs.map(([name, qty]) => `
+        <div style="margin-bottom:.8rem">
+          <div style="display:flex;justify-content:space-between;font-size:.83rem">
+            <span>${name}</span>
+            <strong>${qty}</strong>
+          </div>
+          <div class="bar-wrap">
+            <div class="bar-fill" style="width:${Math.min(qty * 15, 100)}%"></div>
+          </div>
         </div>
-        <div class="bar-wrap"><div class="bar-fill" style="width:${Math.round((d.revenueByStaff?.[s.name]||0)/maxRev*100)}%"></div></div>
-      </div>`).join('') : '<div class="empty">Chưa có nhân viên</div>';
-  } catch(e) {
-    toast('Lỗi tải dashboard: '+e.message,'error');
-  }
+      `).join('')
+    : '<div class="empty">Chưa có dữ liệu</div>';
+
+  // =========================
+  // STAFF REVENUE
+  // =========================
+
+  const staffMap = {};
+
+  data.forEach(inv => {
+    staffMap[inv.staffName] = (staffMap[inv.staffName] || 0) + inv.total;
+  });
+
+  const maxRevenue = Math.max(...Object.values(staffMap), 1);
+
+  document.getElementById('staff-bars').innerHTML = Object.keys(staffMap).length
+    ? Object.entries(staffMap).map(([name, rev]) => `
+        <div style="margin-bottom:.9rem">
+          <div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:.25rem">
+            <span>${name}</span>
+            <strong>${fmt(rev)}</strong>
+          </div>
+          <div class="bar-wrap">
+            <div class="bar-fill" style="width:${(rev / maxRevenue) * 100}%"></div>
+          </div>
+        </div>
+      `).join('')
+    : '<div class="empty">Chưa có dữ liệu</div>';
 }
 
 // ══ SETTINGS ═════════════════════════════════════════════════
