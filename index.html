@@ -583,8 +583,15 @@ tr:hover td{background:#fdf6f9}
 
 <script>
 // ══ CONFIG ════════════════════════════════════════════════════
+// Tìm và thay thế đoạn khai báo cfg cũ bằng đoạn này:
 const CFG_KEY = 'spa_config';
-let cfg = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
+let cfg = JSON.parse(localStorage.getItem(CFG_KEY)) || {
+  scriptUrl: "DÁN_URL_WEB_APP_CỦA_BẠN_VÀO_ĐÂY", // Thay link vào đây
+  spaName: "Phương Mai Beauty & Spa",
+  address: "",
+  spaPhone: "",
+  vat: "8"
+};
 
 // URL cố định — không cần nhập lại
 if (!cfg.scriptUrl) {
