@@ -922,6 +922,47 @@ async function checkout() {
       cSave('customers');
     }
     showInvoice({...payload.data, invoiceNo: res.invoiceNo}, staff);
+
+// UPDATE CACHE REALTIME
+const newInvoice = {
+  ...payload.data,
+  invoiceNo: res.invoiceNo,
+  date: todayStr()
+};
+
+CACHE.invoices.unshift(newInvoice);
+CACHE.invoices = [...CACHE.invoices];
+cSave('invoices');
+
+if (custObj) {
+  custObj.visits = (custObj.visits || 0) + 1;
+  custObj.totalSpent = (custObj.totalSpent || 0) + total;
+  custObj.lastVisit = todayStr();
+} else {
+
+  const newCustomer = {
+    id: 'CUS_' + Date.now(),
+    name: cname,
+    phone: document.getElementById('pos-phone').value,
+    visits: 1,
+    totalSpent: total,
+    lastVisit: todayStr(),
+    rank: 'Mới',
+    skinType: '',
+    allergy: ''
+  };
+
+  CACHE.customers.push(newCustomer);
+}
+
+cSave('customers');
+
+// refresh realtime
+renderHistoryTable();
+renderStaff();
+loadDashboard();
+renderCusts();
+  
     // Reset POS
     selected = {};
     document.getElementById('pos-cname').value = '';
@@ -1264,36 +1305,166 @@ async function saveCust() {
 // ══ DASHBOARD ════════════════════════════════════════════════
 async function loadDashboard() {
   const dateInput = document.getElementById('dash-date').value;
-  const [y,m,day] = dateInput.split('-');
+
+  const [y, m, day] = dateInput.split('-');
+
   const dateStr = `${day}/${m}/${y}`;
+
   document.getElementById('d-date').textContent = dateStr;
+
   try {
-    const d = await api({action:'getDashboard', date: dateStr});
-    document.getElementById('d-rev').textContent  = fmt(d.totalRevenue);
-    document.getElementById('d-cnt').textContent  = d.customerCount;
-    document.getElementById('d-comm').textContent = fmt(d.totalCommission);
-    document.getElementById('d-low').textContent  = d.lowStockCount;
 
-    const maxSvc = d.topServices?.[0]?.rev || 1;
-    document.getElementById('top-svcs').innerHTML = (d.topServices||[]).length ? d.topServices.map(s => `
-      <div style="margin-bottom:.65rem">
-        <div style="display:flex;justify-content:space-between;font-size:.83rem;margin-bottom:.28rem">
-          <span>${s.name}</span><span style="font-weight:600;color:var(--rose-dark)">${fmt(s.rev)}</span>
-        </div>
-        <div class="bar-wrap"><div class="bar-fill" style="width:${Math.round(s.rev/maxSvc*100)}%"></div></div>
-      </div>`).join('') : '<div class="empty">Chưa có dữ liệu</div>';
+    // =========================
+    // FILTER INVOICES THEO NGÀY
+    // =========================
 
-    const staff = CACHE.staff;
-    const maxRev = Math.max(...Object.values(d.revenueByStaff||{}), 1);
-    document.getElementById('staff-bars').innerHTML = staff.length ? staff.map(s => `
-      <div style="margin-bottom:.65rem" class="bar-teal">
-        <div style="display:flex;justify-content:space-between;font-size:.83rem;margin-bottom:.28rem">
-          <span>${s.name}</span><span style="font-weight:600;color:var(--teal)">${fmt(d.revenueByStaff?.[s.name]||0)}</span>
+    const invoices = (CACHE.invoices || []).filter(inv => {
+      return inv.date === dateStr;
+    });
+
+    // =========================
+    // TỔNG DOANH THU
+    // =========================
+
+    const totalRevenue = invoices.reduce((sum, inv) => {
+      return sum + (Number(inv.total) || 0);
+    }, 0);
+
+    // =========================
+    // LƯỢT KHÁCH
+    // =========================
+
+    const customerCount = invoices.length;
+
+    // =========================
+    // HOA HỒNG
+    // =========================
+
+    const totalCommission = invoices.reduce((sum, inv) => {
+      return sum + (Number(inv.commission) || 0);
+    }, 0);
+
+    // =========================
+    // LOW STOCK
+    // =========================
+
+    const lowStockCount = (CACHE.inventory || []).filter(i => {
+      return Number(i.stock || 0) <= Number(i.min || 0);
+    }).length;
+
+    // =========================
+    // UPDATE KPI
+    // =========================
+
+    document.getElementById('d-rev').textContent = fmt(totalRevenue);
+
+    document.getElementById('d-cnt').textContent = customerCount;
+
+    document.getElementById('d-comm').textContent = fmt(totalCommission);
+
+    document.getElementById('d-low').textContent = lowStockCount;
+
+    // =========================
+    // TOP SERVICES
+    // =========================
+
+    const svcMap = {};
+
+    invoices.forEach(inv => {
+
+      (inv.items || []).forEach(it => {
+
+        if (!svcMap[it.name]) {
+          svcMap[it.name] = 0;
+        }
+
+        svcMap[it.name] += Number(it.total || 0);
+
+      });
+
+    });
+
+    const topServices = Object.entries(svcMap)
+      .map(([name, rev]) => ({name, rev}))
+      .sort((a, b) => b.rev - a.rev)
+      .slice(0, 5);
+
+    const maxSvc = topServices[0]?.rev || 1;
+
+    document.getElementById('top-svcs').innerHTML =
+      topServices.length
+      ? topServices.map(s => `
+        <div style="margin-bottom:.65rem">
+          <div style="display:flex;justify-content:space-between;font-size:.83rem;margin-bottom:.28rem">
+            <span>${s.name}</span>
+            <span style="font-weight:600;color:var(--rose-dark)">
+              ${fmt(s.rev)}
+            </span>
+          </div>
+
+          <div class="bar-wrap">
+            <div class="bar-fill"
+              style="width:${Math.round(s.rev/maxSvc*100)}%">
+            </div>
+          </div>
         </div>
-        <div class="bar-wrap"><div class="bar-fill" style="width:${Math.round((d.revenueByStaff?.[s.name]||0)/maxRev*100)}%"></div></div>
-      </div>`).join('') : '<div class="empty">Chưa có nhân viên</div>';
+      `).join('')
+      : '<div class="empty">Chưa có dữ liệu</div>';
+
+    // =========================
+    // DOANH THU NHÂN VIÊN
+    // =========================
+
+    const revenueByStaff = {};
+
+    invoices.forEach(inv => {
+
+      const staffName = inv.staffName || 'Không xác định';
+
+      if (!revenueByStaff[staffName]) {
+        revenueByStaff[staffName] = 0;
+      }
+
+      revenueByStaff[staffName] += Number(inv.total || 0);
+
+    });
+
+    const staff = CACHE.staff || [];
+
+    const maxRev = Math.max(
+      ...Object.values(revenueByStaff),
+      1
+    );
+
+    document.getElementById('staff-bars').innerHTML =
+      staff.length
+      ? staff.map(s => `
+        <div style="margin-bottom:.65rem" class="bar-teal">
+
+          <div style="display:flex;justify-content:space-between;font-size:.83rem;margin-bottom:.28rem">
+            <span>${s.name}</span>
+
+            <span style="font-weight:600;color:var(--teal)">
+              ${fmt(revenueByStaff[s.name] || 0)}
+            </span>
+          </div>
+
+          <div class="bar-wrap">
+            <div class="bar-fill"
+              style="width:${Math.round(((revenueByStaff[s.name] || 0)/maxRev)*100)}%">
+            </div>
+          </div>
+
+        </div>
+      `).join('')
+      : '<div class="empty">Chưa có nhân viên</div>';
+
   } catch(e) {
-    toast('Lỗi tải dashboard: '+e.message,'error');
+
+    console.error(e);
+
+    toast('Lỗi tải dashboard: ' + e.message, 'error');
+
   }
 }
 
