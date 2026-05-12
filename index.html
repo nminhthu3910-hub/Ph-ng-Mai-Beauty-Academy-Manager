@@ -576,11 +576,15 @@ const SPA_ADDR = () => (cfg.address || '') + (cfg.spaPhone ? ' · ☎ ' + cfg.sp
 
 // ══ CACHE (localStorage fallback) ════════════════════════════
 const CACHE = {
-  services:  [],
-  staff:     [],
-  customers: [],
-  inventory: [],
-  invoices:  [],
+
+  invoices: JSON.parse(localStorage.getItem('pm_invoices') || '[]'),
+
+  customers: JSON.parse(localStorage.getItem('pm_customers') || '[]'),
+
+  inventory: JSON.parse(localStorage.getItem('pm_inventory') || '[]'),
+
+  staff: JSON.parse(localStorage.getItem('pm_staff') || '[]')
+
 };
 const CKEY = {
   services:  'spa_c_services',
@@ -928,12 +932,29 @@ async function checkout() {
 
 const newInvoice = {
   ...payload.data,
+
   invoiceNo: res.invoiceNo,
-  date: todayStr()
+
+  date: todayStr(),
+
+  total: Number(payload.data.total || 0),
+
+  commission: Number(payload.data.commission || 0),
+
+  staffName: staff?.name || '',
+
+  createdAt: Date.now()
 };
 
 // lưu invoice vào cache
 CACHE.invoices.unshift(newInvoice);
+
+CACHE.invoices = [...CACHE.invoices];
+
+localStorage.setItem(
+  'pm_invoices',
+  JSON.stringify(CACHE.invoices)
+);
 
 // cập nhật lượt khách
 if (custObj) {
@@ -957,7 +978,9 @@ if (custObj) {
   CACHE.customers.push(newCustomer);
 }
 
-cSave('customers');
+function cSave(k){
+  localStorage.setItem('pm_'+k, JSON.stringify(CACHE[k]));
+}
 
 // refresh UI realtime
 renderHistoryTable();
