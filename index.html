@@ -265,7 +265,9 @@ tr:hover td{background:#fdf6f9}
       <div class="card">
         <div class="card-title">💆 Dịch vụ</div>
         <div id="svc-loading" class="empty" style="padding:1rem">if (!CACHE.services) {
-  return '<div>Chưa kết nối dữ liệu</div>';
+  return `
+  <div>Chưa kết nối dữ liệu</div>
+`;
 }</div>
         <div class="svc-grid" id="svc-grid" style="display:none"></div>
         <div id="prod-section" style="display:none">
