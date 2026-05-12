@@ -699,7 +699,11 @@ const todayStr = () => {
   const d = new Date();
   return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
 };
-const isoToday = () => new Date().toISOString().slice(0,10);
+// isoToday dùng LOCAL time (không dùng UTC) để tránh lệch ngày qua đêm
+const isoToday = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+};
 function isoToDmy(iso) {
   if (!iso || !iso.includes('-')) return todayStr();
   const [y,m,d] = iso.split('-');
