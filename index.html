@@ -237,6 +237,29 @@ tr:hover td{background:#fdf6f9}
           <label>Giờ vào</label>
           <input id="pos-timein" type="time">
         </div>
+        <div class="field">
+  <label>Loại da</label>
+
+  <select id="pos-skin">
+
+    <option value="">-- Chọn loại da --</option>
+
+    <option>Dầu</option>
+
+    <option>Khô</option>
+
+    <option>Hỗn hợp</option>
+
+    <option>Nhạy cảm</option>
+
+    <option>Mụn</option>
+
+    <option>Lão hoá</option>
+
+    <option>Thường</option>
+
+  </select>
+</div>
       </div>
 
       <div class="card">
@@ -576,11 +599,15 @@ const SPA_ADDR = () => (cfg.address || '') + (cfg.spaPhone ? ' · ☎ ' + cfg.sp
 
 // ══ CACHE (localStorage fallback) ════════════════════════════
 const CACHE = {
-  services:  [],
-  staff:     [],
-  customers: [],
-  inventory: [],
-  invoices:  [],
+
+  invoices: JSON.parse(localStorage.getItem('pm_invoices') || '[]'),
+
+  customers: JSON.parse(localStorage.getItem('pm_customers') || '[]'),
+
+  inventory: JSON.parse(localStorage.getItem('pm_inventory') || '[]'),
+
+  staff: JSON.parse(localStorage.getItem('pm_staff') || '[]')
+
 };
 const CKEY = {
   services:  'spa_c_services',
@@ -916,23 +943,147 @@ async function checkout() {
     cSave('inventory');
     // Update local customer cache
     if (custObj) {
-      custObj.totalSpent = (custObj.totalSpent||0) + total;
-      custObj.visits = (custObj.visits||0) + 1;
-      custObj.lastVisit = todayStr();
-      cSave('customers');
-    }
-    showInvoice({...payload.data, invoiceNo: res.invoiceNo}, staff);
+
+  // UPDATE KHÁCH CŨ
+  custObj.totalSpent = (custObj.totalSpent || 0) + total;
+
+  custObj.visits = (custObj.visits || 0) + 1;
+
+  custObj.lastVisit = todayStr();
+
+  // UPDATE LOẠI DA
+  custObj.skinType =
+    document.getElementById('pos-skin').value
+    || custObj.skinType
+    || '';
+
+} else {
+
+  // TẠO KHÁCH MỚI
+  const newCustomer = {
+
+    id: 'CUS_' + Date.now(),
+
+    name: cname,
+
+    phone: document.getElementById('pos-phone').value,
+
+    visits: 1,
+
+    totalSpent: total,
+
+    lastVisit: todayStr(),
+
+    rank: 'Mới',
+
+    skinType:
+      document.getElementById('pos-skin').value || '',
+
+    allergy: ''
+
+  };
+
+  CACHE.customers.push(newCustomer);
+}
+
+// SAVE CUSTOMER CACHE
+cSave('customers');
+
+// SHOW INVOICE
+showInvoice(
+  {...payload.data, invoiceNo: res.invoiceNo},
+  staff
+);
+
+// =============================
+// UPDATE DASHBOARD REALTIME
+// =============================
+
+const newInvoice = {
+
+  ...payload.data,
+
+  invoiceNo: res.invoiceNo,
+
+  date: todayStr(),
+
+  total: Number(payload.data.total || 0),
+
+  commission: Number(payload.data.commission || 0),
+
+  staffName: staff?.name || '',
+
+  createdAt: Date.now()
+
+};
+
+CACHE.invoices.unshift(newInvoice);
+
+CACHE.invoices = [...CACHE.invoices];
+
+// SAVE LOCAL
+localStorage.setItem(
+  'pm_invoices',
+  JSON.stringify(CACHE.invoices)
+);
+
+// REFRESH UI
+renderHistoryTable();
+
+renderStaff();
+
+loadDashboard();
+
+renderCusts();
+
+// RESET POS
+selected = {};
+
+document.getElementById('pos-cname').value = '';
+
+document.getElementById('pos-phone').value = '';
+
+document.getElementById('pos-skin').value = '';
+
+document.getElementById('pos-note').value = '';
+
+document.getElementById('pos-discount').value = 0;
+
+document.getElementById('pos-payment').value = 'Tiền mặt';
+
+document.getElementById('pos-staff').value = '';
+
+// render lại POS
+renderPOS();
 
 // UPDATE CACHE REALTIME
 const newInvoice = {
   ...payload.data,
+
   invoiceNo: res.invoiceNo,
-  date: todayStr()
+
+  date: todayStr(),
+
+  total: Number(payload.data.total || 0),
+
+  commission: Number(payload.data.commission || 0),
+
+  staffName: staff?.name || '',
+
+  createdAt: Date.now()
 };
 
 CACHE.invoices.unshift(newInvoice);
+
 CACHE.invoices = [...CACHE.invoices];
-cSave('invoices');
+
+localStorage.setItem(
+  'pm_invoices',
+  JSON.stringify(CACHE.invoices)
+);
+function cSave(k){
+  localStorage.setItem('pm_'+k, JSON.stringify(CACHE[k]));
+}
 
 if (custObj) {
   custObj.visits = (custObj.visits || 0) + 1;
@@ -948,7 +1099,7 @@ if (custObj) {
     totalSpent: total,
     lastVisit: todayStr(),
     rank: 'Mới',
-    skinType: '',
+    skinType: document.getElementById('pos-skin').value || '',
     allergy: ''
   };
 
@@ -1319,8 +1470,12 @@ async function loadDashboard() {
     // =========================
 
     const invoices = (CACHE.invoices || []).filter(inv => {
-      return inv.date === dateStr;
-    });
+
+  if (!inv.date) return false;
+
+  return String(inv.date).trim() === String(dateStr).trim();
+
+});
 
     // =========================
     // TỔNG DOANH THU
