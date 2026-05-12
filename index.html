@@ -179,6 +179,18 @@ tr:hover td{background:#fdf6f9}
 .year-bar.prev{background:var(--rose-light)}
 .year-col{display:flex;flex-direction:column;align-items:center;flex:1;gap:2px}
 .year-month-lbl{font-size:.6rem;color:var(--muted);margin-top:.15rem}
+.prod-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:.65rem;margin-top:.3rem}
+.prod-card{border:2px solid var(--border);border-radius:var(--radius);padding:.7rem;cursor:pointer;transition:all .18s;background:var(--white);position:relative}
+.prod-card:hover{border-color:var(--rose-light);background:var(--rose-pale)}
+.prod-card.out-of-stock{opacity:.45;cursor:not-allowed;background:#f5f5f5}
+.prod-card .prod-name{font-weight:500;font-size:.84rem;margin-bottom:.25rem;line-height:1.3}
+.prod-card .prod-price{color:var(--rose-dark);font-weight:600;font-size:.9rem}
+.prod-card .prod-stock{font-size:.72rem;color:var(--muted);margin-top:.18rem}
+.prod-card .prod-stock.low{color:#c62828;font-weight:500}
+.prod-qty-row{display:flex;align-items:center;justify-content:center;gap:.4rem;margin-top:.5rem}
+.prod-qty-row button{width:26px;height:26px;border-radius:50%;border:1px solid var(--border);background:var(--white);cursor:pointer;font-size:.9rem;display:flex;align-items:center;justify-content:center;transition:all .15s}
+.prod-qty-row button:hover{background:var(--rose-pale);border-color:var(--rose)}
+.prod-qty-row .qty-val{min-width:22px;text-align:center;font-weight:600;font-size:.88rem}
 @media print{nav,.no-print{display:none!important}}
 </style>
 </head>
@@ -263,10 +275,13 @@ tr:hover td{background:#fdf6f9}
         <div class="card-title">💆 Dịch vụ</div>
         <div id="svc-loading" class="empty" style="padding:1rem">Đang tải dịch vụ...</div>
         <div class="svc-grid" id="svc-grid" style="display:none"></div>
-        <div id="prod-section" style="display:none">
-          <div style="font-size:.72rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:.85rem 0 .45rem">Sản phẩm bán lẻ</div>
-          <div class="svc-grid" id="prod-grid"></div>
+      </div>
+      <div class="card" id="prod-section" style="display:none">
+        <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>🛍️ Sản phẩm bán lẻ</span>
+          <span id="prod-low-badge" style="font-size:.72rem;color:var(--rose-dark)"></span>
         </div>
+        <div class="prod-grid" id="prod-grid"></div>
       </div>
     </div>
 
@@ -1157,10 +1172,13 @@ function renderServiceGrid() {
   const grid    = document.getElementById('svc-grid');
   const pSec    = document.getElementById('prod-section');
   const pGrid   = document.getElementById('prod-grid');
+
   if (!svcs.length && !prods.length) {
     loading.textContent = 'Chưa có dịch vụ. Nhấn Đồng bộ để tải.';
     loading.style.display=''; grid.style.display='none'; pSec.style.display='none'; return;
   }
+
+  // Dịch vụ
   loading.style.display='none'; grid.style.display='';
   grid.innerHTML = svcs.map(s=>`
     <div class="svc-card ${selected[s.id]?'selected':''}" onclick="toggleSvc('${s.id}')" id="sc-${s.id}">
@@ -1168,24 +1186,72 @@ function renderServiceGrid() {
       <div class="svc-price">${fmt(s.price)}</div>
       <div class="svc-dur">${s.dur?s.dur+' phút':''}</div>
     </div>`).join('');
+
+  // Sản phẩm bán lẻ — card riêng với qty controls
   if (prods.length) {
     pSec.style.display='';
+    const lowCount = prods.filter(p=>{ const inv=invMap[p.id]; return inv&&inv.stock>0&&inv.stock<=inv.min; }).length;
+    const outCount = prods.filter(p=>{ const inv=invMap[p.id]; return inv&&inv.stock<=0; }).length;
+    const badge = document.getElementById('prod-low-badge');
+    if (badge) badge.textContent = outCount>0?`⚠️ ${outCount} hết hàng`:lowCount>0?`⚠️ ${lowCount} sắp hết`:'';
+
     pGrid.innerHTML = prods.map(p=>{
-      const inv=invMap[p.id]; const out=inv&&inv.stock<=0;
-      return `<div class="svc-card ${selected[p.id]?'selected':''} ${out?'out-of-stock':''}"
-               onclick="toggleSvc('${p.id}')" id="sc-${p.id}">
-        <div class="svc-name">${p.name}</div>
-        <div class="svc-price">${fmt(p.price)}</div>
-        <div class="svc-dur">Tồn: ${inv?inv.stock:'?'} ${p.unit||''}${out?' ⚠️':''}</div>
+      const inv   = invMap[p.id];
+      const stock = inv ? inv.stock : null;
+      const min   = inv ? (inv.min||3) : 3;
+      const out   = stock !== null && stock <= 0;
+      const low   = !out && stock !== null && stock <= min;
+      const qty   = selected[p.id] || 0;
+      return `<div class="prod-card ${out?'out-of-stock':''}" id="pc-${p.id}">
+        <div class="prod-name">${p.name}</div>
+        <div class="prod-price">${fmt(p.price)}</div>
+        <div class="prod-stock ${low?'low':''}">${
+          stock===null ? '—' :
+          out ? '🔴 Hết hàng' :
+          low ? `⚠️ Còn ${stock} ${p.unit||''}` :
+          `Tồn: ${stock} ${p.unit||''}`
+        }</div>
+        ${out ? '' : `<div class="prod-qty-row">
+          <button onclick="changeProdQty('${p.id}',-1)" ${qty<=0?'style="opacity:.35"':''}>−</button>
+          <span class="qty-val" id="pqv-${p.id}">${qty>0?qty:'Thêm'}</span>
+          <button onclick="changeProdQty('${p.id}',1)">+</button>
+        </div>`}
       </div>`;
     }).join('');
   } else pSec.style.display='none';
 }
 
+// Điều chỉnh số lượng sản phẩm bán lẻ
+function changeProdQty(id, delta) {
+  const inv   = C.inventory.find(i=>i.id==id);
+  const cur   = selected[id] || 0;
+  const newQty = Math.max(0, cur + delta);
+
+  // Không vượt quá tồn kho
+  if (inv && newQty > inv.stock) {
+    toast(`Chỉ còn ${inv.stock} ${C.services.find(s=>s.id==id)?.unit||''}`, 'error');
+    return;
+  }
+
+  if (newQty <= 0) {
+    delete selected[id];
+  } else {
+    selected[id] = newQty;
+  }
+
+  // Cập nhật qty hiển thị trên card
+  const qv = document.getElementById('pqv-'+id);
+  if (qv) qv.textContent = newQty > 0 ? newQty : 'Thêm';
+  const pc = document.getElementById('pc-'+id);
+  if (pc) pc.style.outline = newQty>0 ? '2px solid var(--rose)' : '';
+
+  renderOrder();
+}
+
 function toggleSvc(id) {
   const svc = C.services.find(s=>s.id==id);
-  const inv = C.inventory.find(i=>i.id==id);
-  if (svc?.type==='bán lẻ' && inv && inv.stock<=0) { toast('Sản phẩm đã hết hàng','error'); return; }
+  // Bán lẻ dùng changeProdQty, không dùng toggle
+  if (svc?.type==='bán lẻ') { changeProdQty(id, 1); return; }
   selected[id] = selected[id] ? 0 : 1;
   if (!selected[id]) delete selected[id];
   document.getElementById('sc-'+id)?.classList.toggle('selected', !!selected[id]);
@@ -1205,12 +1271,18 @@ function renderOrder() {
   }
   document.getElementById('order-items').innerHTML = items.map(it=>`
     <div style="display:flex;align-items:center;justify-content:space-between;padding:.45rem 0;border-bottom:1px solid var(--border)">
-      <div><div style="font-size:.86rem;font-weight:500">${it.name}</div>
-           <div style="font-size:.73rem;color:var(--muted)">${fmt(it.price)} × ${it.qty}</div></div>
+      <div>
+        <div style="font-size:.86rem;font-weight:500">${it.name}
+          ${it.type==='bán lẻ'?'<span style="font-size:.65rem;background:var(--teal-light);color:var(--teal);border-radius:4px;padding:.1rem .35rem;margin-left:.3rem">SP</span>':''}
+        </div>
+        <div style="font-size:.73rem;color:var(--muted)">${fmt(it.price)} × ${it.qty}</div>
+      </div>
       <div style="display:flex;align-items:center;gap:.3rem">
-        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem" onclick="changeQty('${it.id}',-1)">−</button>
+        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem"
+          onclick="${it.type==='bán lẻ'?`changeProdQty('${it.id}',-1)`:`changeQty('${it.id}',-1)`}">−</button>
         <span style="min-width:18px;text-align:center;font-weight:500">${it.qty}</span>
-        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem" onclick="changeQty('${it.id}',1)">+</button>
+        <button class="btn btn-ghost btn-sm" style="padding:.18rem .45rem"
+          onclick="${it.type==='bán lẻ'?`changeProdQty('${it.id}',1)`:`changeQty('${it.id}',1)`}">+</button>
         <span style="font-weight:600;color:var(--rose-dark);min-width:75px;text-align:right">${fmt(it.price*it.qty)}</span>
       </div>
     </div>`).join('');
@@ -1330,6 +1402,9 @@ async function checkout() {
     document.getElementById('pos-disc').value='0';
     document.getElementById('pos-timein').value=new Date().toTimeString().slice(0,5);
     renderServiceGrid(); renderOrder();
+    // Cập nhật tồn kho hiển thị trên prod cards
+    document.querySelectorAll('[id^="pqv-"]').forEach(el=>{ el.textContent='Thêm'; });
+    document.querySelectorAll('[id^="pc-"]').forEach(el=>{ el.style.outline=''; });
 
     // Refresh các tab khác từ cache đã cập nhật
     renderHistoryTable(C.invoices);
