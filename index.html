@@ -627,7 +627,6 @@ tr:hover td{background:#fdf6f9}
 // ══ CONFIG ════════════════════════════════════════════════════
 const CFG_KEY = 'spa_config';
 let cfg = JSON.parse(localStorage.getItem(CFG_KEY) || '{}');
-
 if (!cfg.scriptUrl) {
   cfg.scriptUrl = "https://script.google.com/macros/s/AKfycbw8JM9xFmAQ0g9wFD0vAhuxOwXSBEuCFkF-b-_NfdT6dLFHasb4P39q62fuy2OSF8A-pg/exec";
   cfg.spaName   = "Phương Mai Beauty&Academy";
@@ -636,13 +635,16 @@ if (!cfg.scriptUrl) {
   cfg.vat       = "8";
   localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
 }
+function getUrl()  { return cfg.scriptUrl || ''; }
+const VAT_RATE = () => (parseFloat(cfg.vat) || 8) / 100;
+const SPA_NAME = () => cfg.spaName  || '🌸 Phương Mai';
+const SPA_ADDR = () => (cfg.address || '') + (cfg.spaPhone ? ' · ☎ ' + cfg.spaPhone : '');
 
-function getUrl() { return cfg.scriptUrl || ''; }
-const VAT_RATE  = () => (parseFloat(cfg.vat) || 8) / 100;
-const SPA_NAME  = () => cfg.spaName  || '🌸 Phương Mai';
-const SPA_ADDR  = () => (cfg.address || '') + (cfg.spaPhone ? ' · ☎ ' + cfg.spaPhone : '');
-
-// ══ CACHE (chỉ lưu master data, KHÔNG lưu invoices — luôn lấy từ Sheets) ════
+// ══ PERSISTENT STORE ═════════════════════════════════════════
+// Lưu tất cả dữ liệu vào localStorage để không bao giờ mất
+// Key invoices: spa_inv_MM-YYYY  (mảng hoá đơn của tháng đó)
+// Key monthly:  spa_mon_MM-YYYY  (tổng hợp tháng từ getInvoicesByMonth)
+// Key year:     spa_yr_YYYY      (tổng hợp năm từ getInvoicesByYear)
 const CKEY = {
   services:  'spa_c_services',
   staff:     'spa_c_staff',
@@ -654,10 +656,35 @@ const CACHE = {
   staff:     JSON.parse(localStorage.getItem(CKEY.staff)     || '[]'),
   customers: JSON.parse(localStorage.getItem(CKEY.customers) || '[]'),
   inventory: JSON.parse(localStorage.getItem(CKEY.inventory) || '[]'),
-  // invoices hôm nay — tải từ Sheets mỗi khi mở tab, KHÔNG persist
+  // invoices hôm nay — nguồn sự thật, CHỈ syncAll() được ghi
   invoices:  [],
 };
 function cSave(key) { localStorage.setItem(CKEY[key], JSON.stringify(CACHE[key])); }
+
+// --- Lưu/đọc invoices theo tháng (MM-YYYY) ---
+function invMonKey(m, y)   { return `spa_inv_${String(m).padStart(2,'0')}-${y}`; }
+function saveInvMonth(m, y, list) {
+  localStorage.setItem(invMonKey(m, y), JSON.stringify(list));
+}
+function loadInvMonth(m, y) {
+  const raw = localStorage.getItem(invMonKey(m, y));
+  return raw ? JSON.parse(raw) : null;
+}
+
+// --- Lưu/đọc tổng hợp tháng (getInvoicesByMonth result) ---
+function monSumKey(m, y)   { return `spa_mon_${String(m).padStart(2,'0')}-${y}`; }
+function saveMonSum(m, y, list) {
+  localStorage.setItem(monSumKey(m, y), JSON.stringify(list));
+}
+function loadMonSum(m, y) {
+  const raw = localStorage.getItem(monSumKey(m, y));
+  return raw ? JSON.parse(raw) : null;
+}
+
+// --- Lưu/đọc tổng hợp năm ---
+function yrKey(y)      { return `spa_yr_${y}`; }
+function saveYrSum(y, list) { localStorage.setItem(yrKey(y), JSON.stringify(list)); }
+function loadYrSum(y)  { const r = localStorage.getItem(yrKey(y)); return r ? JSON.parse(r) : null; }
 
 // ══ HELPERS ══════════════════════════════════════════════════
 const fmt      = n => (Number(n)||0).toLocaleString('vi-VN') + 'đ';
@@ -680,12 +707,11 @@ function isoToDmy(iso) {
   return `${d}/${m}/${y}`;
 }
 function daysInMonth(m, y) { return new Date(y, m, 0).getDate(); }
-
 function trendHtml(cur, prev) {
-  if (!prev) return '';
+  if (!prev) return '<span class="trend-flat">Chưa có dữ liệu kỳ trước</span>';
   const pct = Math.round((cur - prev) / prev * 100);
-  if (pct > 0)  return `<span class="trend-up">▲ ${pct}% so tháng trước</span>`;
-  if (pct < 0)  return `<span class="trend-down">▼ ${Math.abs(pct)}% so tháng trước</span>`;
+  if (pct > 0)  return `<span class="trend-up">▲ ${pct}% so kỳ trước</span>`;
+  if (pct < 0)  return `<span class="trend-down">▼ ${Math.abs(pct)}% so kỳ trước</span>`;
   return `<span class="trend-flat">= Không đổi</span>`;
 }
 
@@ -694,25 +720,39 @@ function showLoading(msg='Đang xử lý...') {
   document.getElementById('loading-msg').textContent = msg;
 }
 function hideLoading() { document.getElementById('loading').classList.add('hidden'); }
-
-function setSyncing(on) {
-  document.getElementById('sync-btn').classList.toggle('spinning', on);
-}
-
+function setSyncing(on) { document.getElementById('sync-btn').classList.toggle('spinning', on); }
 function toast(msg, type='info') {
   const el = document.createElement('div');
   el.className = `alert alert-${type==='error'?'danger':'info'}`;
   el.style.cssText = 'position:fixed;bottom:1.2rem;right:1.2rem;z-index:999;min-width:220px;box-shadow:0 4px 16px rgba(0,0,0,.15)';
   el.textContent = msg;
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3200);
+  setTimeout(() => el.remove(), 3500);
+}
+
+// Banner mất internet
+function showOfflineBanner() {
+  let b = document.getElementById('offline-banner');
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'offline-banner';
+    b.className = 'alert alert-danger';
+    b.style.cssText = 'position:fixed;top:56px;left:0;right:0;z-index:300;border-radius:0;text-align:center;margin:0';
+    b.textContent = '📵 Mất kết nối internet — Vui lòng kết nối lại để đồng bộ dữ liệu mới nhất';
+    document.body.appendChild(b);
+  }
+}
+function hideOfflineBanner() {
+  const b = document.getElementById('offline-banner');
+  if (b) b.remove();
 }
 
 // ══ CLOCK ════════════════════════════════════════════════════
 function updateClock() {
   const s = new Date().toLocaleString('vi-VN',{weekday:'short',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
   document.getElementById('nav-clock').textContent = s;
-  document.getElementById('pos-dt').textContent = s;
+  const posdt = document.getElementById('pos-dt');
+  if (posdt) posdt.textContent = s;
 }
 updateClock(); setInterval(updateClock, 1000);
 
@@ -739,10 +779,23 @@ async function apiPost(body) {
   return data;
 }
 
+// ══ ABORT CONTROLLER — Fix race condition ════════════════════
+// Mỗi "slot" tab có 1 AbortController riêng
+// Khi bấm tab mới cùng slot → abort request cũ → không render đè
+const _abort = {};
+function getAbortSignal(slot) {
+  if (_abort[slot]) _abort[slot].abort();
+  _abort[slot] = new AbortController();
+  return _abort[slot].signal;
+}
+function isAborted(slot) {
+  return _abort[slot] && _abort[slot].signal.aborted;
+}
+
 // ══ INIT DATE INPUTS ═════════════════════════════════════════
-document.getElementById('pos-timein').value  = new Date().toTimeString().slice(0,5);
-document.getElementById('hist-date').value   = isoToday();
-document.getElementById('dash-date').value   = isoToday();
+document.getElementById('pos-timein').value = new Date().toTimeString().slice(0,5);
+document.getElementById('hist-date').value  = isoToday();
+document.getElementById('dash-date').value  = isoToday();
 
 // ══ NAV ══════════════════════════════════════════════════════
 function goPage(id, el) {
@@ -752,12 +805,14 @@ function goPage(id, el) {
   if (pg) pg.classList.add('active');
   if (el) el.classList.add('active');
 
-  if (id === 'history')   loadHistory();        // luôn tải từ Sheets
+  // Mỗi tab dùng hàm render đồng bộ ngay (sync) từ CACHE
+  // rồi kick off async fetch riêng — abort controller ngăn race condition
+  if (id === 'history')   { renderHistoryTable(CACHE.invoices); fetchHistory(); }
   if (id === 'inventory') renderInventory();
-  if (id === 'staff')     loadStaffPage();       // tải invoices hôm nay từ Sheets cho hoa hồng
+  if (id === 'staff')     { renderStaff(CACHE.invoices); fetchStaffInvoices(); }
   if (id === 'customers') renderCusts();
-  if (id === 'dashboard') loadDashboardPage();   // tải invoices từ Sheets
-  if (id === 'monthly')   loadMonthlyPage();     // tải tháng từ Sheets
+  if (id === 'dashboard') { renderDashboardData(CACHE.invoices); fetchDashboard(); }
+  if (id === 'monthly')   loadMonthlyPage();
   if (id === 'settings')  loadConfigForm();
 }
 
@@ -772,54 +827,141 @@ function saveScriptUrl() {
   cfg.scriptUrl = url;
   localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
   document.getElementById('setup-banner').classList.remove('show');
-  toast('Đã lưu URL! Đang đồng bộ...','ok');
   syncAll();
 }
 
-// ══ SYNC ALL (master data + invoices hôm nay) ════════════════
+// ══ SYNC ALL ═════════════════════════════════════════════════
+// syncAll là nguồn sự thật duy nhất cho CACHE.invoices
+// Không có hàm nào khác được ghi CACHE.invoices ngoài đây
 async function syncAll() {
   if (!cfg.scriptUrl) return;
   setSyncing(true);
   try {
-    const [svcs, staff, customers, inventory, todayInv] = await Promise.all([
+    const now = new Date();
+    const thisM = now.getMonth() + 1;
+    const thisY = now.getFullYear();
+    const prevM = thisM === 1 ? 12 : thisM - 1;
+    const prevY = thisM === 1 ? thisY - 1 : thisY;
+
+    // FIX 7: Tải master data + invoices hôm nay + tháng này + tháng trước song song
+    const [svcs, staff, customers, inventory, todayInv, curMonth, prevMonth] = await Promise.all([
       api({ action: 'getServices' }),
       api({ action: 'getStaff' }),
       api({ action: 'getCustomers' }),
       api({ action: 'getInventory' }),
       api({ action: 'getInvoices', date: todayStr() }),
+      api({ action: 'getInvoicesByMonth', month: thisM, year: thisY }),
+      api({ action: 'getInvoicesByMonth', month: prevM, year: prevY }),
     ]);
+
+    // Cập nhật master cache
     CACHE.services  = Array.isArray(svcs)       ? svcs       : CACHE.services;
     CACHE.staff     = Array.isArray(staff)       ? staff      : CACHE.staff;
     CACHE.customers = Array.isArray(customers)   ? customers  : CACHE.customers;
     CACHE.inventory = Array.isArray(inventory)   ? inventory  : CACHE.inventory;
-    CACHE.invoices  = Array.isArray(todayInv)    ? todayInv   : [];
     cSave('services'); cSave('staff'); cSave('customers'); cSave('inventory');
 
-    // Render trang đang active
-    renderCurrentPage();
+    // FIX 3: CHỈ syncAll được ghi CACHE.invoices
+    CACHE.invoices = Array.isArray(todayInv) ? todayInv : [];
+
+    // FIX 7: Lưu tháng vào localStorage để không bao giờ mất
+    if (Array.isArray(curMonth))  saveMonSum(thisM, thisY, curMonth);
+    if (Array.isArray(prevMonth)) saveMonSum(prevM, prevY, prevMonth);
+
+    // Render trang đang active với dữ liệu mới
+    renderActivePage();
+    hideOfflineBanner();
     toast('Đồng bộ thành công ✓', 'ok');
   } catch(e) {
-    renderCurrentPage();
-    toast('Lỗi đồng bộ: ' + e.message, 'error');
+    // Mất internet hoặc lỗi API
+    if (!navigator.onLine || e.message.includes('fetch') || e.message.includes('network')) {
+      showOfflineBanner();
+    } else {
+      toast('Lỗi đồng bộ: ' + e.message, 'error');
+    }
+    renderActivePage(); // Vẫn render từ cache cũ
   }
   setSyncing(false);
 }
 
-function renderCurrentPage() {
+// Render trang đang active với dữ liệu đã có trong CACHE (không gọi API)
+function renderActivePage() {
   const active = document.querySelector('.page.active');
   if (!active) return;
-  const id = active.id.replace('page-','');
+  const id = active.id.replace('page-', '');
   if (id === 'pos')       { renderServiceGrid(); renderOrder(); updateStaffSelect(); updateCustDatalist(); }
   if (id === 'history')   renderHistoryTable(CACHE.invoices);
   if (id === 'inventory') renderInventory();
-  if (id === 'staff')     renderStaffFromCache();
+  if (id === 'staff')     renderStaff(CACHE.invoices);
   if (id === 'customers') renderCusts();
-  if (id === 'dashboard') renderDashboardFromCache();
-  // monthly không render từ cache — cần API riêng
+  if (id === 'dashboard') renderDashboardData(CACHE.invoices);
+  if (id === 'monthly')   renderMonthFromCache(); // dùng cache localStorage
 }
 
 // Auto-refresh mỗi 5 phút
-setInterval(() => { if (cfg.scriptUrl) syncAll(); }, 5 * 60 * 1000);
+setInterval(() => { if (cfg.scriptUrl && navigator.onLine) syncAll(); }, 5 * 60 * 1000);
+
+// ══ FETCH HELPERS (abort-safe, không ghi CACHE.invoices) ════
+// FIX 1+3: Các hàm này dùng biến local, không đụng CACHE.invoices
+
+async function fetchHistory() {
+  const signal  = getAbortSignal('history');
+  const dateStr = isoToDmy(document.getElementById('hist-date').value);
+  try {
+    const data = await api({ action:'getInvoices', date: dateStr });
+    if (signal.aborted) return; // FIX 1: bị cancel, không render
+    const list = Array.isArray(data) ? data : [];
+    // FIX 7: Lưu ngày đã tải để không mất
+    const key = `spa_inv_${dateStr.replace(/\//g,'-')}`;
+    localStorage.setItem(key, JSON.stringify(list));
+    // Nếu là hôm nay → cập nhật CACHE.invoices (qua syncAll pattern)
+    // Nhưng KHÔNG ghi đè nếu syncAll đang chạy → dùng biến riêng
+    _histData = list;
+    renderHistoryTable(list);
+    hideOfflineBanner();
+  } catch(e) {
+    if (signal.aborted) return;
+    if (!navigator.onLine) showOfflineBanner();
+    // Thử đọc từ localStorage
+    const key = `spa_inv_${dateStr.replace(/\//g,'-')}`;
+    const saved = localStorage.getItem(key);
+    if (saved) { _histData = JSON.parse(saved); renderHistoryTable(_histData); }
+  }
+}
+
+async function fetchStaffInvoices() {
+  const signal = getAbortSignal('staff');
+  try {
+    const data = await api({ action:'getInvoices', date: todayStr() });
+    if (signal.aborted) return;
+    const list = Array.isArray(data) ? data : [];
+    // Cập nhật CACHE.invoices vì đây là hôm nay — đồng bộ với syncAll
+    CACHE.invoices = list;
+    renderStaff(list);
+    hideOfflineBanner();
+  } catch(e) {
+    if (signal.aborted) return;
+    if (!navigator.onLine) showOfflineBanner();
+    renderStaff(CACHE.invoices);
+  }
+}
+
+async function fetchDashboard() {
+  const signal  = getAbortSignal('dashboard');
+  const dateStr = isoToDmy(document.getElementById('dash-date')?.value || '');
+  try {
+    const data = await api({ action:'getInvoices', date: dateStr });
+    if (signal.aborted) return;
+    const list = Array.isArray(data) ? data : [];
+    if (dateStr === todayStr()) CACHE.invoices = list;
+    renderDashboardData(list);
+    hideOfflineBanner();
+  } catch(e) {
+    if (signal.aborted) return;
+    if (!navigator.onLine) showOfflineBanner();
+    renderDashboardData(CACHE.invoices);
+  }
+}
 
 // ══ POS: SERVICE GRID ════════════════════════════════════════
 let selected = {};
@@ -964,7 +1106,7 @@ async function checkout() {
     });
     cSave('inventory');
 
-    // Thêm vào CACHE.invoices (hôm nay) để render ngay không cần gọi API lại
+    // Thêm invoice mới vào CACHE.invoices (hôm nay)
     const newInv = {
       ...payload.data, invoiceNo: res.invoiceNo, date: todayStr(),
       total: Number(total), commission: Number(commission),
@@ -976,15 +1118,14 @@ async function checkout() {
       cust.totalSpent = (cust.totalSpent||0) + total;
       cust.visits     = (cust.visits||0) + 1;
       cust.lastVisit  = todayStr();
-      cSave('customers');
     } else {
       CACHE.customers.push({ id:'CUS_'+Date.now(), name:cname,
         phone: document.getElementById('pos-phone').value,
         visits:1, totalSpent:total, lastVisit:todayStr(), tier:'Đồng', skin:'', allergy:'' });
-      cSave('customers');
     }
+    cSave('customers');
 
-    // Hiển thị hoá đơn
+    // Hiển thị hoá đơn TRƯỚC — sync, không async, không đóng modal
     showInvoice({...payload.data, invoiceNo:res.invoiceNo}, staff);
     toast('Lưu thành công! Hoá đơn đã ghi vào Sheets ✓','ok');
 
@@ -997,10 +1138,11 @@ async function checkout() {
     document.getElementById('pos-timein').value = new Date().toTimeString().slice(0,5);
     renderServiceGrid(); renderOrder();
 
-    // Refresh tabs (sync — không làm đóng modal)
+    // Refresh tabs khác — tất cả sync từ CACHE đã cập nhật
     renderHistoryTable(CACHE.invoices);
-    renderStaffFromCache();
-    renderDashboardFromCache();
+    renderStaff(CACHE.invoices);
+    renderDashboardData(CACHE.invoices);
+
   } catch(e) {
     hideLoading();
     toast('Lỗi lưu: '+e.message,'error');
@@ -1032,34 +1174,8 @@ function showInvoice(d, staff) {
   openModal('invoice-modal');
 }
 
-// ══ HISTORY (luôn tải từ Sheets) ════════════════════════════
-async function loadHistory() {
-  const dateStr = isoToDmy(document.getElementById('hist-date').value);
-  const isToday = (dateStr === todayStr());
-
-  // Nếu là hôm nay và đã có cache từ syncAll → render ngay, tải lại nền
-  if (isToday && CACHE.invoices.length > 0) {
-    renderHistoryTable(CACHE.invoices);
-  } else {
-    document.getElementById('hist-body').innerHTML = '<tr><td colspan="9" class="empty">⏳ Đang tải...</td></tr>';
-  }
-
-  try {
-    const data = await api({ action:'getInvoices', date: dateStr });
-    const list = Array.isArray(data) ? data : [];
-    if (isToday) CACHE.invoices = list;  // cập nhật cache hôm nay
-    renderHistoryTable(list);
-  } catch(e) {
-    if (isToday && CACHE.invoices.length) {
-      renderHistoryTable(CACHE.invoices);
-      toast('Dùng cache local (lỗi API: '+e.message+')', 'error');
-    } else {
-      document.getElementById('hist-body').innerHTML = `<tr><td colspan="9" class="empty">Lỗi: ${e.message}</td></tr>`;
-    }
-  }
-}
-
-let _histData = []; // data đang render trong bảng history
+// ══ HISTORY ══════════════════════════════════════════════════
+let _histData = [];
 
 function renderHistoryTable(data) {
   _histData = Array.isArray(data) ? data : [];
@@ -1083,16 +1199,16 @@ function renderHistoryTable(data) {
       <td><span class="badge b-teal">${t.payment||''}</span></td>
       <td><button class="btn btn-ghost btn-sm" onclick="reInvoice(${i})">🧾</button></td>
     </tr>`).join('');
-  const total    = _histData.reduce((s,t)=>s+t.total,0);
-  const cash     = _histData.filter(t=>t.payment==='Tiền mặt').reduce((s,t)=>s+t.total,0);
+  const total = _histData.reduce((s,t)=>s+(Number(t.total)||0),0);
+  const cash  = _histData.filter(t=>t.payment==='Tiền mặt').reduce((s,t)=>s+(Number(t.total)||0),0);
   document.getElementById('h-count').textContent    = _histData.length;
   document.getElementById('h-rev').textContent      = fmt(total);
   document.getElementById('h-cash').textContent     = fmt(cash);
   document.getElementById('h-transfer').textContent = fmt(total-cash);
 }
+
 function reInvoice(i) {
-  const t = _histData[i];
-  if (!t) return;
+  const t = _histData[i]; if (!t) return;
   showInvoice({...t, invoiceNo:t.invoiceNo, items:t.items||[]}, {});
 }
 function exportCSV() {
@@ -1107,21 +1223,8 @@ function exportCSV() {
 }
 
 // ══ DASHBOARD ════════════════════════════════════════════════
-async function loadDashboardPage() {
-  // Render ngay từ cache, rồi tải từ Sheets
-  renderDashboardFromCache();
-  try {
-    const dateStr = isoToDmy(document.getElementById('dash-date')?.value || '');
-    const data = await api({ action:'getInvoices', date: dateStr });
-    const list = Array.isArray(data) ? data : [];
-    if (dateStr === todayStr()) CACHE.invoices = list;
-    renderDashboardData(list);
-  } catch(e) { /* giữ nguyên cache */ }
-}
-
-function renderDashboardFromCache() { renderDashboardData(CACHE.invoices); }
-
 function renderDashboardData(data) {
+  data = Array.isArray(data) ? data : [];
   const rev      = data.reduce((s,t)=>s+(Number(t.total)||0),0);
   const comm     = data.reduce((s,t)=>s+(Number(t.commission)||0),0);
   const lowStock = CACHE.inventory.filter(i=>i.stock<=i.min&&i.min>0).length;
@@ -1156,20 +1259,9 @@ function renderDashboardData(data) {
     : '<div class="empty">Chưa có dữ liệu</div>';
 }
 
-// ══ STAFF PAGE ═══════════════════════════════════════════════
-async function loadStaffPage() {
-  renderStaffFromCache();
-  try {
-    const data = await api({ action:'getInvoices', date: todayStr() });
-    CACHE.invoices = Array.isArray(data) ? data : [];
-    renderStaffFromCache();
-  } catch(e) { /* giữ cache */ }
-}
-
-function renderStaffFromCache() { renderStaff(CACHE.invoices); }
-
+// ══ STAFF ════════════════════════════════════════════════════
 function renderStaff(txns) {
-  txns = txns || CACHE.invoices;
+  txns = Array.isArray(txns) ? txns : CACHE.invoices;
   const staff   = CACHE.staff;
   const revMap  = {}, cntMap = {}, commMap = {};
   txns.forEach(t=>{
@@ -1213,18 +1305,17 @@ async function saveStaff() {
   try {
     const res = await apiPost({action:'addStaff',data:d});
     d.id = res.id; CACHE.staff.push(d); cSave('staff');
-    updateStaffSelect(); closeModal('add-staff-modal'); renderStaffFromCache();
+    updateStaffSelect(); closeModal('add-staff-modal'); renderStaff(CACHE.invoices);
     toast('Đã thêm nhân viên','ok');
   } catch(e) { toast('Lỗi: '+e.message,'error'); }
   hideLoading();
 }
 async function delStaff(id) {
-  if (!confirm('Xoá nhân viên này?')) return;
-  showLoading();
+  if (!confirm('Xoá nhân viên này?')) return; showLoading();
   try {
     await apiPost({action:'deleteStaff',id});
     CACHE.staff = CACHE.staff.filter(s=>s.id!=id); cSave('staff');
-    updateStaffSelect(); renderStaffFromCache(); toast('Đã xoá','ok');
+    updateStaffSelect(); renderStaff(CACHE.invoices); toast('Đã xoá','ok');
   } catch(e) { toast('Lỗi: '+e.message,'error'); }
   hideLoading();
 }
@@ -1282,7 +1373,10 @@ async function saveSvc() {
   try {
     const res = await apiPost({action:'addService',data:d}); d.id = res.id;
     CACHE.services.push(d); cSave('services');
-    if (d.type==='bán lẻ') { CACHE.inventory.push({id:res.id,name:d.name,type:d.type,unit:d.unit,stock:d.stock,min:d.min,status:d.stock<=d.min?'Sắp hết':'Còn hàng'}); cSave('inventory'); }
+    if (d.type==='bán lẻ') {
+      CACHE.inventory.push({id:res.id,name:d.name,type:d.type,unit:d.unit,stock:d.stock,min:d.min,status:d.stock<=d.min?'Sắp hết':'Còn hàng'});
+      cSave('inventory');
+    }
     closeModal('add-svc-modal'); renderInventory(); renderServiceGrid(); toast('Đã thêm','ok');
   } catch(e) { toast('Lỗi: '+e.message,'error'); }
   hideLoading();
@@ -1331,23 +1425,18 @@ async function saveCust() {
 }
 
 // ══ MONTHLY PAGE ═════════════════════════════════════════════
-let _monthView   = { m: new Date().getMonth()+1, y: new Date().getFullYear() };
-let _isYearView  = false;
-let _monthCache  = {};  // key: "MM/YYYY" → array of invoices
-let _yearCache   = {};  // key: "YYYY"    → array of 12 month summaries
-let _prevYearCache = {};
+let _mv = { m: new Date().getMonth()+1, y: new Date().getFullYear() };
+let _isYearView = false;
 
 function monthNav(delta) {
-  if (_isYearView) {
-    _monthView.y += delta;
-  } else {
-    _monthView.m += delta;
-    if (_monthView.m > 12) { _monthView.m = 1; _monthView.y++; }
-    if (_monthView.m < 1)  { _monthView.m = 12; _monthView.y--; }
+  if (_isYearView) { _mv.y += delta; }
+  else {
+    _mv.m += delta;
+    if (_mv.m > 12) { _mv.m = 1; _mv.y++; }
+    if (_mv.m < 1)  { _mv.m = 12; _mv.y--; }
   }
   loadMonthlyPage();
 }
-
 function toggleYearView() {
   _isYearView = !_isYearView;
   document.getElementById('btn-year-view').textContent = _isYearView ? 'Theo tháng' : 'Cả năm';
@@ -1357,61 +1446,80 @@ function toggleYearView() {
 }
 
 async function loadMonthlyPage() {
-  const { m, y } = _monthView;
-  const mStr = String(m).padStart(2,'0');
-
   if (_isYearView) {
-    document.getElementById('month-label').textContent = `Năm ${y}`;
-    await loadYearView(y);
+    document.getElementById('month-label').textContent = `Năm ${_mv.y}`;
+    await loadYearView(_mv.y);
   } else {
-    document.getElementById('month-label').textContent = `Tháng ${m}/${y}`;
-    await loadMonthView(m, y);
+    document.getElementById('month-label').textContent = `Tháng ${_mv.m}/${_mv.y}`;
+    await loadMonthView(_mv.m, _mv.y);
+  }
+}
+
+// Render monthly từ cache localStorage (không gọi API)
+function renderMonthFromCache() {
+  if (_isYearView) {
+    const cur  = loadYrSum(_mv.y)   || [];
+    const prev = loadYrSum(_mv.y-1) || [];
+    if (cur.length || prev.length) renderYearView(_mv.y);
+  } else {
+    const cur  = loadMonSum(_mv.m, _mv.y) || [];
+    const prevM = _mv.m===1?12:_mv.m-1, prevY = _mv.m===1?_mv.y-1:_mv.y;
+    const prev = loadMonSum(prevM, prevY) || [];
+    if (cur.length || prev.length) _renderMonthView(_mv.m, _mv.y, cur, prev);
   }
 }
 
 async function loadMonthView(m, y) {
-  const key     = `${String(m).padStart(2,'0')}/${y}`;
-  const prevM   = m===1 ? 12 : m-1;
-  const prevY   = m===1 ? y-1 : y;
-  const prevKey = `${String(prevM).padStart(2,'0')}/${prevY}`;
+  const signal = getAbortSignal('monthly');
+  const prevM  = m===1?12:m-1, prevY=m===1?y-1:y;
 
-  // Loading state
-  document.getElementById('monthly-loading').style.display = '';
-
-  try {
-    // Tải tháng này và tháng trước song song nếu chưa có cache
-    const [curData, prevData] = await Promise.all([
-      _monthCache[key]     ? Promise.resolve(_monthCache[key])     : api({action:'getInvoicesByMonth', month:m,    year:y}),
-      _monthCache[prevKey] ? Promise.resolve(_monthCache[prevKey]) : api({action:'getInvoicesByMonth', month:prevM, year:prevY}),
-    ]);
-    _monthCache[key]     = Array.isArray(curData)  ? curData  : [];
-    _monthCache[prevKey] = Array.isArray(prevData) ? prevData : [];
-  } catch(e) {
-    toast('Lỗi tải dữ liệu tháng: '+e.message,'error');
-    _monthCache[key]     = _monthCache[key]     || [];
-    _monthCache[prevKey] = _monthCache[prevKey] || [];
+  // Hiện cache ngay nếu có
+  const cachedCur  = loadMonSum(m, y);
+  const cachedPrev = loadMonSum(prevM, prevY);
+  if (cachedCur !== null) {
+    _renderMonthView(m, y, cachedCur, cachedPrev||[]);
+  } else {
+    document.getElementById('monthly-loading').style.display = '';
+    document.getElementById('monthly-view').style.display = 'none';
   }
 
-  document.getElementById('monthly-loading').style.display = 'none';
-  renderMonthView(m, y);
+  if (!navigator.onLine) { showOfflineBanner(); document.getElementById('monthly-loading').style.display='none'; document.getElementById('monthly-view').style.display=''; return; }
+
+  try {
+    const [curData, prevData] = await Promise.all([
+      api({action:'getInvoicesByMonth', month:m, year:y}),
+      api({action:'getInvoicesByMonth', month:prevM, year:prevY}),
+    ]);
+    if (signal.aborted) return;
+    const cur  = Array.isArray(curData)  ? curData  : [];
+    const prev = Array.isArray(prevData) ? prevData : [];
+    // FIX 7: Lưu vào localStorage
+    saveMonSum(m, y, cur);
+    saveMonSum(prevM, prevY, prev);
+    document.getElementById('monthly-loading').style.display = 'none';
+    document.getElementById('monthly-view').style.display = '';
+    _renderMonthView(m, y, cur, prev);
+    hideOfflineBanner();
+  } catch(e) {
+    if (signal.aborted) return;
+    if (!navigator.onLine) showOfflineBanner();
+    else toast('Lỗi tải tháng: '+e.message,'error');
+    document.getElementById('monthly-loading').style.display = 'none';
+    document.getElementById('monthly-view').style.display = '';
+  }
 }
 
-function renderMonthView(m, y) {
-  const key     = `${String(m).padStart(2,'0')}/${y}`;
-  const prevM   = m===1?12:m-1, prevY=m===1?y-1:y;
-  const prevKey = `${String(prevM).padStart(2,'0')}/${prevY}`;
-  const cur     = _monthCache[key]     || [];
-  const prev    = _monthCache[prevKey] || [];
-
+function _renderMonthView(m, y, cur, prev) {
+  cur  = Array.isArray(cur)  ? cur  : [];
+  prev = Array.isArray(prev) ? prev : [];
   const curRev  = cur.reduce((s,t)=>s+(Number(t.total)||0),0);
   const prevRev = prev.reduce((s,t)=>s+(Number(t.total)||0),0);
   const curComm = cur.reduce((s,t)=>s+(Number(t.commission)||0),0);
-
   document.getElementById('m-rev').textContent      = fmt(curRev);
   document.getElementById('m-cnt').textContent      = cur.length;
   document.getElementById('m-comm').textContent     = fmt(curComm);
   document.getElementById('m-prev-rev').textContent = fmt(prevRev);
-  document.getElementById('m-rev-trend').innerHTML  = trendHtml(curRev,  prevRev);
+  document.getElementById('m-rev-trend').innerHTML  = trendHtml(curRev, prevRev);
   document.getElementById('m-cnt-trend').innerHTML  = trendHtml(cur.length, prev.length);
   document.getElementById('m-comm-trend').innerHTML = '';
 
@@ -1425,12 +1533,11 @@ function renderMonthView(m, y) {
   const maxDay = Math.max(...Object.values(dayMap), 1);
   let barsHtml = '';
   for (let d=1; d<=days; d++) {
-    const ds   = String(d).padStart(2,'0');
-    const val  = dayMap[ds] || 0;
-    const h    = Math.round((val/maxDay)*100);
-    const tip  = val ? fmtShort(val) : '';
+    const ds  = String(d).padStart(2,'0');
+    const val = dayMap[ds] || 0;
+    const h   = Math.round((val/maxDay)*100);
     barsHtml += `<div class="chart-bar-col" title="${ds}/${String(m).padStart(2,'0')}: ${fmt(val)}">
-      <div class="chart-bar" style="height:${h}%;background:${val?'var(--rose)':'var(--rose-pale)'}" ></div>
+      <div class="chart-bar" style="height:${h}%;background:${val?'var(--rose)':'var(--rose-pale)'}"></div>
       <div class="chart-bar-lbl">${d%5===0||d===1?d:''}</div>
     </div>`;
   }
@@ -1452,11 +1559,11 @@ function renderMonthView(m, y) {
     : '<div class="empty">Chưa có dữ liệu</div>';
 
   // Nhân viên
-  const staffMap = {}, commMap2 = {}, cntMap = {};
+  const staffMap={}, commMap2={}, cntMap={};
   cur.forEach(inv=>{
-    staffMap[inv.staffName] = (staffMap[inv.staffName]||0) + (Number(inv.total)||0);
-    commMap2[inv.staffName] = (commMap2[inv.staffName]||0)+ (Number(inv.commission)||0);
-    cntMap[inv.staffName]   = (cntMap[inv.staffName]||0)  + 1;
+    staffMap[inv.staffName] = (staffMap[inv.staffName]||0)+(Number(inv.total)||0);
+    commMap2[inv.staffName] = (commMap2[inv.staffName]||0)+(Number(inv.commission)||0);
+    cntMap[inv.staffName]   = (cntMap[inv.staffName]||0)+1;
   });
   const maxStaff = Math.max(...Object.values(staffMap),1);
   document.getElementById('m-staff').innerHTML = Object.keys(staffMap).length
@@ -1473,51 +1580,62 @@ function renderMonthView(m, y) {
 }
 
 async function loadYearView(y) {
-  document.getElementById('monthly-loading').style.display = '';
+  const signal = getAbortSignal('year');
+  const cachedCur  = loadYrSum(y);
+  const cachedPrev = loadYrSum(y-1);
+  if (cachedCur !== null) {
+    renderYearView(y);
+  } else {
+    document.getElementById('monthly-loading').style.display = '';
+    document.getElementById('year-view').style.display = 'none';
+  }
+
+  if (!navigator.onLine) { showOfflineBanner(); document.getElementById('monthly-loading').style.display='none'; document.getElementById('year-view').style.display=''; return; }
+
   try {
     const [curYear, prevYear] = await Promise.all([
-      _yearCache[y]   ? Promise.resolve(_yearCache[y])   : api({action:'getInvoicesByYear', year:y}),
-      _yearCache[y-1] ? Promise.resolve(_yearCache[y-1]) : api({action:'getInvoicesByYear', year:y-1}),
+      api({action:'getInvoicesByYear', year:y}),
+      api({action:'getInvoicesByYear', year:y-1}),
     ]);
-    _yearCache[y]   = Array.isArray(curYear)  ? curYear  : [];
-    _yearCache[y-1] = Array.isArray(prevYear) ? prevYear : [];
+    if (signal.aborted) return;
+    const cur  = Array.isArray(curYear)  ? curYear  : [];
+    const prev = Array.isArray(prevYear) ? prevYear : [];
+    saveYrSum(y, cur); saveYrSum(y-1, prev); // FIX 7
+    document.getElementById('monthly-loading').style.display = 'none';
+    document.getElementById('year-view').style.display = '';
+    renderYearView(y);
+    hideOfflineBanner();
   } catch(e) {
-    toast('Lỗi tải dữ liệu năm: '+e.message,'error');
-    _yearCache[y]   = _yearCache[y]   || [];
-    _yearCache[y-1] = _yearCache[y-1] || [];
+    if (signal.aborted) return;
+    if (!navigator.onLine) showOfflineBanner();
+    else toast('Lỗi tải năm: '+e.message,'error');
+    document.getElementById('monthly-loading').style.display = 'none';
+    document.getElementById('year-view').style.display = '';
   }
-  document.getElementById('monthly-loading').style.display = 'none';
-  renderYearView(y);
 }
 
 function renderYearView(y) {
-  const cur  = _yearCache[y]   || [];
-  const prev = _yearCache[y-1] || [];
-
+  const cur  = loadYrSum(y)   || [];
+  const prev = loadYrSum(y-1) || [];
   const curRevTotal  = cur.reduce((s,m)=>s+(Number(m.revenue)||0),0);
   const prevRevTotal = prev.reduce((s,m)=>s+(Number(m.revenue)||0),0);
   const curCntTotal  = cur.reduce((s,m)=>s+(Number(m.customers)||0),0);
   const prevCntTotal = prev.reduce((s,m)=>s+(Number(m.customers)||0),0);
-
   document.getElementById('y-rev').textContent      = fmt(curRevTotal);
   document.getElementById('y-cnt').textContent      = curCntTotal;
-  document.getElementById('y-rev-trend').innerHTML  = trendHtml(curRevTotal,  prevRevTotal);
-  document.getElementById('y-cnt-trend').innerHTML  = trendHtml(curCntTotal,  prevCntTotal);
+  document.getElementById('y-rev-trend').innerHTML  = trendHtml(curRevTotal, prevRevTotal);
+  document.getElementById('y-cnt-trend').innerHTML  = trendHtml(curCntTotal, prevCntTotal);
   document.getElementById('y-prev-rev').textContent = fmt(prevRevTotal);
   document.getElementById('y-prev-trend').innerHTML = `<span style="color:var(--muted)">Năm ${y-1}</span>`;
-
-  // Tháng cao nhất
   const bestMonth = cur.reduce((best,m)=>(m.revenue>best.revenue?m:best), {revenue:0,month:0});
   document.getElementById('y-best-month').textContent = bestMonth.month ? `Tháng ${bestMonth.month}` : '—';
   document.getElementById('y-best-rev').textContent   = bestMonth.month ? fmt(bestMonth.revenue) : '';
-
-  // Biểu đồ so sánh 12 tháng
-  const MONTH_NAMES = ['T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'];
-  const allVals = [...cur.map(m=>m.revenue||0), ...prev.map(m=>m.revenue||0)];
-  const maxVal  = Math.max(...allVals, 1);
-  const barHtml = MONTH_NAMES.map((name,i)=>{
-    const cm = cur.find(m=>m.month===(i+1))  || {revenue:0};
-    const pm = prev.find(m=>m.month===(i+1)) || {revenue:0};
+  const MNAMES = ['T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'];
+  const allVals = [...cur.map(m=>m.revenue||0),...prev.map(m=>m.revenue||0)];
+  const maxVal  = Math.max(...allVals,1);
+  document.getElementById('year-bars').innerHTML = MNAMES.map((name,i)=>{
+    const cm = cur.find(m=>m.month===(i+1))  ||{revenue:0};
+    const pm = prev.find(m=>m.month===(i+1)) ||{revenue:0};
     const ch = Math.round((cm.revenue/maxVal)*140);
     const ph = Math.round((pm.revenue/maxVal)*140);
     return `<div class="year-col" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">
@@ -1528,7 +1646,6 @@ function renderYearView(y) {
       <div class="year-month-lbl">${name}</div>
     </div>`;
   }).join('');
-  document.getElementById('year-bars').innerHTML = barHtml;
 }
 
 // ══ SETTINGS ═════════════════════════════════════════════════
@@ -1558,17 +1675,13 @@ document.querySelectorAll('.modal-overlay').forEach(el=>{
   el.addEventListener('click', e=>{ if(e.target===el) el.classList.remove('open'); });
 });
 
-// ══ INIT ═════════════════════════════════════════════════════
+// ══ INIT — FIX 2: Không dùng DOM_ready, gọi trực tiếp ════
 renderServiceGrid();
 renderOrder();
 updateStaffSelect();
 updateCustDatalist();
-
-window.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('hist-date').value = isoToday();
-  document.getElementById('dash-date').value = isoToday();
-  if (cfg.scriptUrl) syncAll();
-});
+// FIX 2: Gọi syncAll() ngay — không wrap trong DOM_ready
+if (cfg.scriptUrl) syncAll();
 
 </script>
 </body>
