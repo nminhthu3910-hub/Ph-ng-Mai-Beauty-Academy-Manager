@@ -952,6 +952,9 @@ async function checkout() {
     };
     CACHE.invoices.unshift(newInvoice);
     cSave('invoices');
+    // Đồng bộ vào cache theo ngày
+    invoicesByDate[todayStr()] = CACHE.invoices;
+    saveInvoiceDateCache();
 
     // Cập nhật khách hàng local
     if (custObj) {
@@ -1029,24 +1032,51 @@ function showInvoice(d, staff) {
 }
 
 // ══ HISTORY ══════════════════════════════════════════════════
+// Cache invoices theo ngày: { "dd/MM/yyyy": [...] }
+const INVOICE_DATE_CACHE_KEY = 'spa_c_invoices_by_date';
+let invoicesByDate = JSON.parse(localStorage.getItem(INVOICE_DATE_CACHE_KEY) || '{}');
+
+function saveInvoiceDateCache() {
+  localStorage.setItem(INVOICE_DATE_CACHE_KEY, JSON.stringify(invoicesByDate));
+}
+
 async function loadHistory() {
   const dateInput = document.getElementById('hist-date').value;
-  // Convert YYYY-MM-DD to DD/MM/YYYY for API
   const [y,m,day] = dateInput.split('-');
   const dateStr = `${day}/${m}/${y}`;
+
+  // Dùng cache nếu đã có và là hôm nay hoặc ngày cũ
+  if (invoicesByDate[dateStr]) {
+    CACHE._histView = invoicesByDate[dateStr];
+    renderHistoryTable();
+    return;
+  }
 
   document.getElementById('hist-body').innerHTML = '<tr><td colspan="9" class="empty">Đang tải...</td></tr>';
   try {
     const data = await api({action:'getInvoices', date: dateStr});
-    CACHE.invoices = data;
+    invoicesByDate[dateStr] = data;
+    saveInvoiceDateCache();
+    // Chỉ cập nhật CACHE.invoices nếu đang xem hôm nay
+    if (dateStr === todayStr()) {
+      CACHE.invoices = data;
+      cSave('invoices');
+    }
+    // Dùng biến tạm để render, không ghi đè CACHE.invoices khi xem ngày khác
+    CACHE._histView = data;
     renderHistoryTable();
   } catch(e) {
-    document.getElementById('hist-body').innerHTML = `<tr><td colspan="9" class="empty">Lỗi: ${e.message}</td></tr>`;
+    if (dateStr === todayStr() && CACHE.invoices.length) {
+      CACHE._histView = CACHE.invoices;
+      renderHistoryTable();
+    } else {
+      document.getElementById('hist-body').innerHTML = `<tr><td colspan="9" class="empty">Lỗi: ${e.message}</td></tr>`;
+    }
   }
 }
 
 function renderHistoryTable() {
-  const data = CACHE.invoices;
+  const data = CACHE._histView !== undefined ? CACHE._histView : CACHE.invoices;
   const body = document.getElementById('hist-body');
   if (!data.length) {
     body.innerHTML = '<tr><td colspan="9" class="empty">Không có giao dịch</td></tr>';
@@ -1077,7 +1107,7 @@ function renderHistoryTable() {
 }
 
 function reInvoice(i) {
-  const t = CACHE.invoices[i];
+  const t = (CACHE._histView !== undefined ? CACHE._histView : CACHE.invoices)[i];
   showInvoice({...t, invoiceNo: t.invoiceNo, timeIn: t.timeIn, timeOut: t.timeOut,
     customerName: t.customerName, customerPhone: t.customerPhone, staffName: t.staffName,
     subtotal: t.subtotal, discount: t.discount, vat: t.vat, total: t.total, payment: t.payment,
@@ -1323,23 +1353,38 @@ async function saveCust() {
 
 // ══ DASHBOARD ════════════════════════════════════════════════
 async function loadDashboard() {
+  // Xác định ngày cần hiển thị
+  const dashDateInput = document.getElementById('dash-date')?.value;
+  let dashDateStr = todayStr();
+  if (dashDateInput) {
+    const [y,m,day] = dashDateInput.split('-');
+    dashDateStr = `${day}/${m}/${y}`;
+  }
 
-  const data = CACHE.invoices || [];
+  // Lấy data theo ngày — KHÔNG ghi đè CACHE.invoices (hôm nay)
+  let data;
+  if (dashDateStr === todayStr()) {
+    data = CACHE.invoices || [];
+  } else if (invoicesByDate[dashDateStr]) {
+    data = invoicesByDate[dashDateStr];
+  } else {
+    try {
+      data = await api({ action: 'getInvoices', date: dashDateStr });
+      invoicesByDate[dashDateStr] = data;
+      saveInvoiceDateCache();
+    } catch(e) { data = []; }
+  }
 
   const totalRevenue = data.reduce((s, t) => s + (Number(t.total) || 0), 0);
-
   const totalCustomers = data.length;
-
   const totalCommission = data.reduce((s, t) => s + (Number(t.commission) || 0), 0);
-
   const lowStock = CACHE.inventory.filter(i => i.stock <= i.min).length;
 
   document.getElementById('d-rev').textContent = fmt(totalRevenue);
   document.getElementById('d-cnt').textContent = totalCustomers;
   document.getElementById('d-comm').textContent = fmt(totalCommission);
   document.getElementById('d-low').textContent = lowStock;
-
-  document.getElementById('d-date').textContent = todayStr();
+  document.getElementById('d-date').textContent = dashDateStr;
 
   // =========================
   // TOP SERVICES
